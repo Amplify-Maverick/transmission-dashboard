@@ -1415,6 +1415,12 @@ def settings():
     return render_template("settings.html")
 
 
+@app.route("/settings/vpn-binding")
+@login_required
+def vpn_binding_guide():
+    return render_template("vpn_binding.html")
+
+
 @app.route("/system")
 @login_required
 def system():
