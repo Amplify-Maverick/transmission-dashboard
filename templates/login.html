@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in &middot; transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="login-body">
+    <main class="login-card">
+        <div class="brand login-brand">transmission-dashboard</div>
+        <form class="login-form" method="post" action="{{ url_for('login') }}" autocomplete="on">
+            {% if error %}
+            <div class="form-error">{{ error }}</div>
+            {% endif %}
+            <label class="field-label" for="username">Username</label>
+            <input
+                type="text"
+                id="username"
+                name="username"
+                value="{{ username or '' }}"
+                autocomplete="username"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                autofocus
+                required
+            >
+            <label class="field-label" for="password">Password</label>
+            <input
+                type="password"
+                id="password"
+                name="password"
+                autocomplete="current-password"
+                required
+            >
+            <button class="btn btn-primary login-submit" type="submit">Login</button>
+        </form>
+    </main>
+</body>
+</html>

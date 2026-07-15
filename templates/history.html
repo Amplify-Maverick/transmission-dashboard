@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>History — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link active">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <nav class="tabs">
+        <button class="tab active" data-tab="copies" type="button">Copies <span class="count" id="copy-count">0</span></button>
+        <button class="tab" data-tab="removed" type="button">Removed <span class="count" id="removed-count">0</span></button>
+    </nav>
+
+    <main class="settings-page">
+        <div class="settings-container">
+            <section class="settings-section" id="pane-removed" hidden>
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Removed torrents</h2>
+                    <p class="settings-section-hint">Magnet links kept for easy redownload. Re-adding starts the torrent in Transmission; if the local files still exist, it picks back up where it left off so you can keep seeding.</p>
+                </header>
+                <div class="hist-table-wrap">
+                    <table class="hist-table">
+                        <thead>
+                            <tr>
+                                <th>Removed</th>
+                                <th>Custom name</th>
+                                <th>Default name</th>
+                                <th class="num">Size</th>
+                                <th class="num">Seeded</th>
+                                <th>Files</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="removed-body">
+                            <tr><td colspan="7" class="hist-empty">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="settings-section" id="pane-copies">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Recent copies to media server</h2>
+                    <p class="settings-section-hint">Last 50 completed copies (newest first).</p>
+                </header>
+                <div class="hist-table-wrap">
+                    <table class="hist-table">
+                        <thead>
+                            <tr>
+                                <th>Finished</th>
+                                <th>Torrent</th>
+                                <th>Folder</th>
+                                <th>Destination</th>
+                                <th>Status</th>
+                                <th class="num">Size</th>
+                                <th class="num">Duration</th>
+                                <th>Notes</th>
+                            </tr>
+                        </thead>
+                        <tbody id="copy-body">
+                            <tr><td colspan="8" class="hist-empty">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link active">History</a>
+        <button type="button" class="bottom-nav-link" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script>
+        function fmtBytes(n) {
+            n = Number(n) || 0;
+            if (n < 1024) return n + ' B';
+            const u = ['KB','MB','GB','TB'];
+            let i = -1;
+            do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+            return n.toFixed(n < 10 ? 2 : 1) + ' ' + u[i];
+        }
+
+        function fmtDuration(startIso, endIso) {
+            if (!startIso || !endIso) return '—';
+            const s = new Date(startIso).getTime();
+            const e = new Date(endIso).getTime();
+            if (!isFinite(s) || !isFinite(e) || e < s) return '—';
+            let sec = Math.round((e - s) / 1000);
+            if (sec < 60) return sec + 's';
+            const m = Math.floor(sec / 60); sec %= 60;
+            if (m < 60) return `${m}m ${sec}s`;
+            const h = Math.floor(m / 60);
+            return `${h}h ${m % 60}m`;
+        }
+
+        function fmtTimestamp(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return iso;
+            return d.toLocaleString();
+        }
+
+        function statusBadge(status) {
+            const cls = {
+                error: 'err', cancelled: 'muted',
+                done: 'ok',
+            }[status] || 'muted';
+            return `<span class="hist-badge hist-badge-${cls}">${status || '—'}</span>`;
+        }
+
+        async function loadRemoved() {
+            const body = document.getElementById('removed-body');
+            try {
+                const r = await fetch('/api/history/removed');
+                if (r.status === 401) { location.href = '/login'; return; }
+                const data = await r.json();
+                const items = (data && data.removed) || [];
+                document.getElementById('removed-count').textContent = items.length;
+                if (items.length === 0) {
+                    body.innerHTML = '<tr><td colspan="7" class="hist-empty">No removed torrents yet.</td></tr>';
+                    return;
+                }
+                body.innerHTML = items.map(it => {
+                    const hasMagnet = !!it.magnet_link;
+                    const filesTag = it.deleted_local_data
+                        ? '<span class="hist-badge hist-badge-warn">deleted</span>'
+                        : '<span class="hist-badge hist-badge-ok">kept</span>';
+                    const redlBtn = hasMagnet
+                        ? `<button class="btn btn-primary btn-sm" data-redownload="${it.id}" type="button">Re-download</button>`
+                        : `<button class="btn btn-sm" disabled title="No magnet link saved" type="button">Re-download</button>`;
+                    const seeded = it.uploaded_ever == null ? '—' : fmtBytes(it.uploaded_ever);
+                    return `
+                        <tr>
+                            <td data-label="Removed">${fmtTimestamp(it.removed_at)}</td>
+                            <td class="hist-name" data-label="Custom name">${escapeHtml(it.custom_name || '—')}</td>
+                            <td class="hist-name" data-label="Default name">${escapeHtml(it.name || ('torrent ' + (it.id || '')))}</td>
+                            <td class="num" data-label="Size">${fmtBytes(it.total_size || 0)}</td>
+                            <td class="num" data-label="Seeded">${seeded}</td>
+                            <td data-label="Files">${filesTag}</td>
+                            <td class="hist-actions" data-label="Actions">
+                                ${redlBtn}
+                                <button class="btn btn-sm" data-forget="${it.id}" type="button">Forget</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (e) {
+                body.innerHTML = `<tr><td colspan="7" class="hist-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+            }
+        }
+
+        document.getElementById('removed-body').addEventListener('click', async e => {
+            const redl = e.target.closest('[data-redownload]');
+            const forget = e.target.closest('[data-forget]');
+            if (redl) {
+                const id = redl.dataset.redownload;
+                redl.disabled = true;
+                redl.textContent = 'Adding…';
+                try {
+                    const r = await fetch(`/api/history/removed/${id}/redownload`, { method: 'POST' });
+                    if (r.status === 401) { location.href = '/login'; return; }
+                    const data = await r.json();
+                    if (!r.ok || (data && data.ok === false)) {
+                        throw new Error((data && data.error) || ('HTTP ' + r.status));
+                    }
+                    redl.textContent = 'Added';
+                } catch (err) {
+                    redl.disabled = false;
+                    redl.textContent = 'Re-download';
+                    alert('Re-download failed: ' + err.message);
+                }
+            } else if (forget) {
+                if (!confirm('Forget this torrent? The magnet link will be removed from history.')) return;
+                const id = forget.dataset.forget;
+                forget.disabled = true;
+                try {
+                    const r = await fetch(`/api/history/removed/${id}/forget`, { method: 'POST' });
+                    if (r.status === 401) { location.href = '/login'; return; }
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    loadRemoved();
+                } catch (err) {
+                    forget.disabled = false;
+                    alert('Forget failed: ' + err.message);
+                }
+            }
+        });
+
+        async function loadCopies() {
+            const body = document.getElementById('copy-body');
+            try {
+                const r = await fetch('/api/history/copies');
+                if (r.status === 401) { location.href = '/login'; return; }
+                const data = await r.json();
+                const copies = (data && data.copies) || [];
+                document.getElementById('copy-count').textContent = copies.length;
+                if (copies.length === 0) {
+                    body.innerHTML = '<tr><td colspan="8" class="hist-empty">No copies yet.</td></tr>';
+                    return;
+                }
+                body.innerHTML = copies.map(c => `
+                    <tr>
+                        <td data-label="Finished">${fmtTimestamp(c.finished_at)}</td>
+                        <td class="hist-name" data-label="Torrent">${escapeHtml(c.torrent_name || ('torrent ' + c.torrent_id))}</td>
+                        <td data-label="Folder">${escapeHtml(c.folder_name || '')}</td>
+                        <td class="hist-name" data-label="Destination">${escapeHtml((c.dest_host || '') + (c.dest_path ? ':' + c.dest_path : ''))}</td>
+                        <td data-label="Status">${statusBadge(c.status)}</td>
+                        <td class="num" data-label="Size">${fmtBytes(c.bytes_transferred || c.total_bytes || 0)}</td>
+                        <td class="num" data-label="Duration">${fmtDuration(c.started_at, c.finished_at)}</td>
+                        <td class="hist-note" data-label="Notes">${escapeHtml(c.error_message || '')}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                body.innerHTML = `<tr><td colspan="8" class="hist-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+            }
+        }
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        document.querySelectorAll('.tab[data-tab]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab[data-tab]').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                const target = btn.dataset.tab;
+                document.getElementById('pane-copies').hidden = target !== 'copies';
+                document.getElementById('pane-removed').hidden = target !== 'removed';
+            });
+        });
+
+        loadCopies();
+        loadRemoved();
+    </script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,3262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link active">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <button type="button" id="add-btn" class="btn btn-primary btn-sm">+ Add Torrent</button>
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" id="logout-btn" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <nav class="tabs">
+        <button class="tab active" data-filter="all" type="button">
+            All <span class="count" data-count="all">0</span>
+        </button>
+        <button class="tab" data-filter="downloading" type="button">
+            Downloading <span class="count" data-count="downloading">0</span>
+        </button>
+        <button class="tab" data-filter="seeding" type="button">
+            Seeding <span class="count" data-count="seeding">0</span>
+        </button>
+        <button class="tab" data-filter="paused" type="button">
+            Paused <span class="count" data-count="paused">0</span>
+        </button>
+        <a href="{{ url_for('system') }}" class="storage-stats storage-stats--media" id="media-storage-stats" title="Media server storage" hidden>
+            <span class="storage-stats-label">Media</span>
+            <div class="storage-stats-meter">
+                <div class="storage-stats-meter-fill" id="media-storage-bar"></div>
+            </div>
+            <span class="storage-stats-text" id="media-storage-text">—</span>
+            <button type="button" class="storage-stats-refresh" id="media-storage-refresh" title="Refresh media server storage" aria-label="Refresh media server storage">↻</button>
+        </a>
+        <a href="{{ url_for('system') }}" class="storage-stats" id="storage-stats" title="System overview">
+            <span class="storage-stats-label">Disk</span>
+            <div class="storage-stats-meter">
+                <div class="storage-stats-meter-fill" id="storage-bar"></div>
+            </div>
+            <span class="storage-stats-text" id="storage-text">—</span>
+            <button type="button" class="storage-stats-refresh" id="storage-refresh" title="Refresh disk storage" aria-label="Refresh disk storage">↻</button>
+        </a>
+        <span class="storage-stats mullvad-days" id="mullvad-days" hidden>
+            <span class="storage-stats-label">VPN</span>
+            <span class="mullvad-days-text" id="mullvad-days-text">—</span>
+        </span>
+    </nav>
+
+    <main class="torrent-list" id="torrents">
+        <section class="torrent-column torrent-column--left">
+            <header class="column-header">
+                <h2 class="column-title">Downloading / Paused</h2>
+                <span class="column-count" data-count="left">0</span>
+                <button type="button" class="column-select-btn" data-select-column="left">Select</button>
+                <label class="column-sort">
+                    <span class="column-sort-label">Sort</span>
+                    <select class="column-sort-select" id="sort-left" data-column="left">
+                        <option value="default">Default (status)</option>
+                        <option value="progress-desc">Progress (most complete)</option>
+                        <option value="progress-asc">Progress (least complete)</option>
+                        <option value="size-desc">Size (largest)</option>
+                        <option value="size-asc">Size (smallest)</option>
+                        <option value="eta-asc">ETA (soonest)</option>
+                        <option value="down-desc">Download speed</option>
+                        <option value="added-desc">Added (newest)</option>
+                        <option value="added-asc">Added (oldest)</option>
+                        <option value="name-asc">Name (A–Z)</option>
+                    </select>
+                </label>
+            </header>
+            <div class="torrent-column-list" id="torrents-left"></div>
+        </section>
+        <section class="torrent-column torrent-column--right">
+            <header class="column-header">
+                <h2 class="column-title">Downloaded / Seeding</h2>
+                <span class="column-count" data-count="right">0</span>
+                <button type="button" class="column-select-btn" data-select-column="right">Select</button>
+                <label class="column-sort">
+                    <span class="column-sort-label">Sort</span>
+                    <select class="column-sort-select" id="sort-right" data-column="right">
+                        <option value="default">Default (ready first)</option>
+                        <option value="size-desc">Size (largest)</option>
+                        <option value="size-asc">Size (smallest)</option>
+                        <option value="ratio-desc">Ratio (highest)</option>
+                        <option value="ratio-asc">Ratio (lowest)</option>
+                        <option value="up-desc">Upload speed</option>
+                        <option value="done-desc">Completed (newest)</option>
+                        <option value="added-desc">Added (newest)</option>
+                        <option value="added-asc">Added (oldest)</option>
+                        <option value="name-asc">Name (A–Z)</option>
+                    </select>
+                </label>
+            </header>
+            <div class="torrent-column-list" id="torrents-right"></div>
+        </section>
+    </main>
+    <div class="empty-state" id="empty" hidden>No torrents to show.</div>
+
+    <!-- Unloaded torrents: parked outside Transmission, magnet kept server-side -->
+    <section class="unloaded-bar" id="unloaded-bar" hidden>
+        <button type="button" class="unloaded-toggle" id="unloaded-toggle" aria-expanded="false" aria-controls="unloaded-list">
+            <span class="column-title">Unloaded</span>
+            <span class="column-count" id="unloaded-count">0</span>
+            <span class="unloaded-hint">Saved on the server, not in Transmission</span>
+            <span class="unloaded-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div class="unloaded-list" id="unloaded-list" hidden></div>
+    </section>
+
+    <!-- Context menu -->
+    <div class="ctx-menu" id="ctx-menu" hidden>
+        <button class="ctx-item" data-action="start" type="button">Start</button>
+        <button class="ctx-item" data-action="stop" type="button">Stop</button>
+        <button class="ctx-item" data-action="rename" type="button">Rename…</button>
+        <button class="ctx-item" data-action="labels" type="button">Edit Labels</button>
+        <div class="ctx-sep"></div>
+        <button class="ctx-item" data-action="copy" type="button">Copy to media server…</button>
+        <div class="ctx-sep"></div>
+        <button class="ctx-item" data-action="verify" type="button">Verify Local Data</button>
+        <div class="ctx-sep"></div>
+        <button class="ctx-item" data-action="unload" type="button">Unload (keep magnet)</button>
+        <button class="ctx-item" data-action="remove" type="button">Remove</button>
+        <button class="ctx-item ctx-danger" data-action="delete" type="button">Remove and Delete Files</button>
+    </div>
+
+    <!-- Rename modal -->
+    <div class="modal-overlay" id="modal-rename" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+            <header class="modal-header">
+                <h2 id="rename-title">Rename torrent</h2>
+                <button class="modal-close" type="button" data-close="modal-rename" aria-label="Close">&times;</button>
+            </header>
+            <div class="modal-body">
+                <p class="field-hint">Custom name is shown on the card. The default torrent name stays accessible in the expanded view.</p>
+                <div class="form-error" id="rename-error" hidden></div>
+                <label class="field-label" for="rename-input">Custom name</label>
+                <input type="text" id="rename-input" autocomplete="off" spellcheck="false" maxlength="200">
+                <label class="field-label" style="margin-top:12px;">Default name</label>
+                <p id="rename-default-name" class="modal-torrent-name"></p>
+            </div>
+            <footer class="modal-footer">
+                <button class="btn" type="button" id="rename-clear" hidden>Clear custom name</button>
+                <button class="btn" type="button" data-close="modal-rename">Cancel</button>
+                <button class="btn btn-primary" type="button" id="rename-save">Save</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Confirm modal -->
+    <div class="modal-overlay" id="modal-confirm" hidden>
+        <div class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+            <header class="modal-header">
+                <h2 id="confirm-title">Confirm</h2>
+                <button class="modal-close" type="button" data-close="modal-confirm" aria-label="Close">&times;</button>
+            </header>
+            <div class="modal-body">
+                <p id="confirm-body"></p>
+                <p id="confirm-target" class="modal-torrent-name"></p>
+            </div>
+            <footer class="modal-footer">
+                <button class="btn" type="button" data-close="modal-confirm">Cancel</button>
+                <button class="btn btn-primary" type="button" id="confirm-ok">Confirm</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Labels modal -->
+    <div class="modal-overlay" id="modal-labels" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="labels-title">
+            <header class="modal-header">
+                <h2 id="labels-title">Edit Labels</h2>
+                <button class="modal-close" type="button" data-close="modal-labels" aria-label="Close">&times;</button>
+            </header>
+            <div class="modal-body">
+                <p id="labels-name" class="modal-torrent-name"></p>
+                <label class="field-label">Labels</label>
+                <div class="chip-input" id="labels-chip-input">
+                    <input type="text" id="labels-input" placeholder="Add label..." autocomplete="off">
+                </div>
+                <p class="field-hint">Press Enter or comma to add. Click &times; to remove.</p>
+            </div>
+            <footer class="modal-footer">
+                <button class="btn" type="button" data-close="modal-labels">Cancel</button>
+                <button class="btn btn-primary" type="button" id="labels-save">Save</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Add Torrent modal -->
+    <div class="modal-overlay" id="modal-add" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-title">
+            <header class="modal-header">
+                <h2 id="add-title">Add Torrent</h2>
+                <button class="modal-close" type="button" data-close="modal-add" aria-label="Close">&times;</button>
+            </header>
+            <div class="add-tabs">
+                <button class="add-tab active" data-add-tab="magnet" type="button">Magnet</button>
+                <button class="add-tab" data-add-tab="file" type="button">File</button>
+            </div>
+            <div class="modal-body">
+                <div class="add-pane" data-add-pane="magnet">
+                    <div class="form-error" id="add-magnet-error" hidden></div>
+                    <label class="field-label" for="add-magnet-input">Magnet link</label>
+                    <textarea id="add-magnet-input" placeholder="magnet:?xt=urn:btih:..." rows="4"></textarea>
+                </div>
+                <div class="add-pane" data-add-pane="file" hidden>
+                    <div class="form-error" id="add-file-error" hidden></div>
+                    <label class="field-label" for="add-file-input">.torrent file</label>
+                    <input type="file" id="add-file-input" accept=".torrent,application/x-bittorrent">
+                </div>
+            </div>
+            <footer class="modal-footer">
+                <button class="btn" type="button" data-close="modal-add">Cancel</button>
+                <button class="btn btn-primary" type="button" id="add-submit">Submit</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Copy to media server modal -->
+    <div class="modal-overlay" id="modal-copy" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="copy-title">
+            <header class="modal-header">
+                <h2 id="copy-title">Copy to media server</h2>
+                <button class="modal-close" type="button" data-close="modal-copy" aria-label="Close">&times;</button>
+            </header>
+            <div class="modal-body">
+                <p id="copy-name" class="modal-torrent-name"></p>
+                <div class="form-error" id="copy-error" hidden></div>
+                <div class="form-info" id="copy-dest-preview" hidden></div>
+
+                <div class="settings-field">
+                    <label class="field-label" for="copy-folder">Destination folder</label>
+                    <select id="copy-folder"></select>
+                    <p class="field-hint">Set up folders on the Settings page.</p>
+                </div>
+
+                <div class="copy-drives" id="copy-drives" hidden></div>
+
+                <div class="settings-field">
+                    <label class="field-label" for="copy-media-type">Media type</label>
+                    <select id="copy-media-type">
+                        <option value="movie">Movie / generic</option>
+                        <option value="show">TV show (Season folder)</option>
+                    </select>
+                </div>
+
+                <div id="copy-movie-fields">
+                    <div class="settings-field">
+                        <label class="field-label" for="copy-subfolder">Subfolder (optional)</label>
+                        <input type="text" id="copy-subfolder" placeholder="Some Movie (2024)/" autocomplete="off" spellcheck="false">
+                        <p class="field-hint">Leave blank to drop directly under the chosen folder. Jellyfin reads the year off the parent folder.</p>
+                    </div>
+
+                    <div class="settings-field">
+                        <label class="field-label" for="copy-rename">Rename (optional)</label>
+                        <input type="text" id="copy-rename" placeholder="leave blank to keep original name" autocomplete="off" spellcheck="false">
+                        <p class="field-hint">Rename the top-level file or folder on its way out. No slashes.</p>
+                    </div>
+                </div>
+
+                <div id="copy-show-fields" hidden>
+                    <div class="settings-field">
+                        <label class="field-label" for="copy-show-name">Show name</label>
+                        <input type="text" id="copy-show-name" placeholder="Trailer Park Boys" autocomplete="off" spellcheck="false">
+                        <p class="field-hint">Folder will be named "Show Name (Year)". Quote characters are stripped.</p>
+                    </div>
+                    <div class="settings-grid">
+                        <div class="settings-field">
+                            <label class="field-label" for="copy-show-year">Year</label>
+                            <input type="number" id="copy-show-year" placeholder="1999" min="1800" max="2200">
+                        </div>
+                        <div class="settings-field" id="copy-show-season-single-wrap">
+                            <label class="field-label" for="copy-show-season">Season number</label>
+                            <input type="number" id="copy-show-season" placeholder="4" min="0" max="99">
+                        </div>
+                        <p class="field-hint settings-field-wide" id="copy-show-single-hint">Episodes land flat in "Season NN" (zero-padded). Only video files are copied — sample/extras folders are skipped.</p>
+                    </div>
+                    <p class="field-hint" id="copy-show-detect-status" hidden>Scanning torrent for seasons…</p>
+                    <div class="settings-field" id="copy-show-multi-wrap" hidden>
+                        <label class="field-label">Seasons detected — pick which to copy</label>
+                        <div id="copy-show-seasons-list" class="copy-seasons-list"></div>
+                        <p class="field-hint" id="copy-show-multi-hint">Each season copies into its own "Season NN" folder under the show.</p>
+                        <p class="field-hint copy-seasons-warning" id="copy-show-unclassified" hidden></p>
+                    </div>
+                </div>
+
+                <label class="copy-checkbox-row">
+                    <input type="checkbox" id="copy-delete-after">
+                    <span>Remove from Transmission and delete local files after a successful copy</span>
+                </label>
+
+                <div id="copy-progress-wrap" hidden>
+                    <div class="progress copy-progress">
+                        <div class="progress-fill" id="copy-progress-fill"></div>
+                    </div>
+                    <div class="copy-progress-meta">
+                        <span id="copy-progress-pct">0%</span>
+                        <span id="copy-progress-bytes">—</span>
+                        <span id="copy-progress-rate">—</span>
+                        <span id="copy-progress-eta">—</span>
+                    </div>
+                    <div class="copy-progress-status" id="copy-progress-status"></div>
+                    <div class="form-error" id="copy-tailscale-auth" hidden>
+                        Tailscale needs to be re-authenticated. Open
+                        <a id="copy-tailscale-auth-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+                        to sign in, then retry the copy.
+                    </div>
+                </div>
+            </div>
+            <footer class="modal-footer">
+                <button class="btn" type="button" data-close="modal-copy" id="copy-cancel-btn">Close</button>
+                <button class="btn" type="button" id="copy-stop-btn" hidden>Stop copy</button>
+                <button class="btn btn-primary" type="button" id="copy-start-btn">Copy</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Bulk action bar -->
+    <div class="bulk-bar" id="bulk-bar" hidden>
+        <div class="bulk-bar-info">
+            <span class="bulk-bar-scope" id="bulk-scope"></span>
+            <span class="bulk-bar-count" id="bulk-count">0 selected</span>
+            <button type="button" class="bulk-bar-link" id="bulk-select-all">Select all</button>
+            <button type="button" class="bulk-bar-link" id="bulk-clear">Clear</button>
+        </div>
+        <div class="bulk-bar-actions">
+            <button type="button" class="btn btn-sm" data-bulk="start">Start</button>
+            <button type="button" class="btn btn-sm" data-bulk="stop">Stop</button>
+            <button type="button" class="btn btn-sm" data-bulk="verify">Verify</button>
+            <button type="button" class="btn btn-sm" data-bulk="unload">Unload</button>
+            <button type="button" class="btn btn-sm" data-bulk="remove">Remove</button>
+            <button type="button" class="btn btn-sm btn-danger" data-bulk="delete">Delete</button>
+            <button type="button" class="btn btn-sm" id="bulk-cancel">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toasts"></div>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link active">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script>
+        // ----- constants -----
+
+        const STATUS_LABELS = {
+            0: 'Stopped',
+            1: 'Check Pending',
+            2: 'Checking',
+            3: 'Download Pending',
+            4: 'Downloading',
+            5: 'Seed Pending',
+            6: 'Seeding',
+        };
+
+        const STATUS_CLASS = {
+            0: 'paused',
+            1: 'checking',
+            2: 'checking',
+            3: 'downloading',
+            4: 'downloading',
+            5: 'seeding',
+            6: 'seeding',
+        };
+
+        // Transmission error codes (TR_STAT_*): 0=OK, 1=tracker warning,
+        // 2=tracker error, 3=local error.
+        const ERROR_KIND = {
+            1: { tag: 'Tracker warning', cls: 'warn' },
+            2: { tag: 'Tracker error', cls: 'err' },
+            3: { tag: 'Local error', cls: 'err' },
+        };
+
+        const FILTERS = {
+            all: () => true,
+            downloading: t => t.status === 3 || t.status === 4,
+            seeding: t => t.status === 5 || t.status === 6,
+            paused: t => t.status === 0,
+        };
+
+        // ----- formatters -----
+
+        function formatSpeed(bps) {
+            if (!bps || bps <= 0) return '0 KB/s';
+            if (bps >= 1024 * 1024) return (bps / (1024 * 1024)).toFixed(1) + ' MB/s';
+            if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KB/s';
+            return bps + ' B/s';
+        }
+
+        function formatSize(bytes) {
+            if (!bytes || bytes <= 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let i = 0, v = bytes;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
+        }
+
+        function formatEta(seconds) {
+            if (seconds === null || seconds === undefined || seconds < 0) return 'Unknown';
+            if (seconds < 60) return seconds + 's';
+            const m = Math.floor(seconds / 60);
+            if (m < 60) return m + 'm';
+            const h = Math.floor(m / 60);
+            const remM = m % 60;
+            if (h < 24) return h + 'h ' + remM + 'm';
+            const d = Math.floor(h / 24);
+            const remH = h % 24;
+            return d + 'd ' + remH + 'h';
+        }
+
+        function formatRatio(r) {
+            if (r === null || r === undefined || r < 0) return '—';
+            return r.toFixed(2);
+        }
+
+        function formatTimestamp(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return iso;
+            return d.toLocaleString();
+        }
+
+        // ----- state -----
+
+        let currentTorrents = [];
+        let activeFilter = 'all';
+        const SORT_STORAGE_KEY = 'td.columnSort.v1';
+        const DEFAULT_SORTS = { left: 'default', right: 'default' };
+        const columnSorts = loadColumnSorts();
+
+        function loadColumnSorts() {
+            try {
+                const raw = localStorage.getItem(SORT_STORAGE_KEY);
+                if (!raw) return { ...DEFAULT_SORTS };
+                const parsed = JSON.parse(raw);
+                return {
+                    left: typeof parsed.left === 'string' ? parsed.left : DEFAULT_SORTS.left,
+                    right: typeof parsed.right === 'string' ? parsed.right : DEFAULT_SORTS.right,
+                };
+            } catch (_) {
+                return { ...DEFAULT_SORTS };
+            }
+        }
+
+        function saveColumnSorts() {
+            try {
+                localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(columnSorts));
+            } catch (_) {}
+        }
+        const cardsById = new Map();
+        const expandedIds = new Set();
+        const detailById = new Map();
+        let copyStatesById = new Map();
+        let copyStateFingerprints = new Map();
+        let mainPollHandle = null;
+        let detailPollHandle = null;
+        let unauthorizedHandled = false;
+
+        // 5s, not 2s: the detail payload carries `peers` + `trackerStats`,
+        // the two heaviest per-torrent fields for the daemon to serialize —
+        // matching the main list poll's cadence halves that load.
+        const DETAIL_POLL_MS = 5000;
+
+        function unauthorizedRedirect() {
+            if (unauthorizedHandled) return;
+            unauthorizedHandled = true;
+            if (mainPollHandle) clearInterval(mainPollHandle);
+            if (detailPollHandle) clearInterval(detailPollHandle);
+            mainPollHandle = null;
+            detailPollHandle = null;
+            window.location.href = '/login';
+        }
+
+        // ----- card rendering -----
+
+        function buildCard(t) {
+            const card = document.createElement('article');
+            card.className = 'card';
+            card.dataset.id = t.id;
+            card.innerHTML = `
+                <div class="card-header">
+                    <label class="card-check" data-field="check-wrap" hidden>
+                        <input type="checkbox" data-field="check" aria-label="Select torrent">
+                        <span class="card-check-box" aria-hidden="true"></span>
+                    </label>
+                    <div class="card-body">
+                        <div class="card-top">
+                            <span class="card-chevron" aria-hidden="true">›</span>
+                            <span class="card-name"></span>
+                            <span class="status-pill status-pill--top" data-field="status"></span>
+                            <span class="card-labels" data-field="labels"></span>
+                        </div>
+                        <div class="progress">
+                            <div class="progress-fill"></div>
+                        </div>
+                        <div class="card-error" data-field="error-box" hidden>
+                            <span class="card-error-tag" data-field="error-tag"></span>
+                            <span class="card-error-msg" data-field="error-msg"></span>
+                        </div>
+                        <div class="card-meta">
+                            <span class="meta-item" data-meta="down"><span class="meta-label">&#8595;</span><span class="meta-value" data-field="down"></span></span>
+                            <span class="meta-item" data-meta="up"><span class="meta-label">&#8593;</span><span class="meta-value" data-field="up"></span></span>
+                            <span class="meta-item" data-meta="seeders" hidden><span class="meta-label">seeders</span><span class="meta-value" data-field="seeders"></span></span>
+                            <span class="meta-item" data-meta="leechers" hidden><span class="meta-label">leechers</span><span class="meta-value" data-field="leechers"></span></span>
+                            <span class="meta-item" data-meta="ratio"><span class="meta-label">ratio</span><span class="meta-value" data-field="ratio"></span></span>
+                            <span class="meta-item" data-meta="eta"><span class="meta-label">eta</span><span class="meta-value" data-field="eta"></span></span>
+                            <span class="meta-item" data-meta="size"><span class="meta-label">size</span><span class="meta-value" data-field="size"></span></span>
+                            <span class="status-pill" data-field="status"></span>
+                        </div>
+                    </div>
+                    <button class="card-send-btn" type="button" data-field="send-btn" hidden aria-label="Send to media server" title="Send to media server">→ Send</button>
+                    <button class="menu-btn" type="button" aria-label="Actions" title="Actions">&#8942;</button>
+                </div>
+                <div class="card-expanded" data-field="expanded" hidden></div>
+            `;
+            card.querySelector('.menu-btn').addEventListener('click', e => {
+                e.stopPropagation();
+                toggleCtxMenu(card, e.currentTarget);
+            });
+            card.querySelector('.card-send-btn').addEventListener('click', e => {
+                e.stopPropagation();
+                const torrent = findTorrent(t.id);
+                if (torrent) openCopyModal(torrent);
+            });
+            card.querySelector('.card-header').addEventListener('click', e => {
+                if (e.target.closest('.menu-btn')) return;
+                if (e.target.closest('.card-send-btn')) return;
+                if (e.target.closest('.card-check')) return;
+                if (selectColumn && cardColumn(t.id) === selectColumn) {
+                    toggleSelection(t.id);
+                    return;
+                }
+                toggleExpand(t.id);
+            });
+            card.querySelector('[data-field="check"]').addEventListener('change', e => {
+                e.stopPropagation();
+                setSelected(t.id, e.currentTarget.checked);
+            });
+            return card;
+        }
+
+        function setField(card, name, value) {
+            card.querySelectorAll(`[data-field="${name}"]`).forEach(el => {
+                if (el.textContent !== value) el.textContent = value;
+            });
+        }
+
+        function renderLabels(card, labels, copyState) {
+            const el = card.querySelector('[data-field="labels"]');
+            const status = copyState && copyState.status;
+            const isCopying = status === 'copying';
+            const labelArr = labels || [];
+            // copy_state is the source of truth for "did the bytes land?". The
+            // Transmission "Copied" label is a convenience tag set afterwards;
+            // if that RPC fails, copy_state still says done and we show "sent"
+            // anyway so the user doesn't think the copy silently dropped.
+            const hasCopiedLabel = labelArr.includes('Copied');
+            const isSent = hasCopiedLabel || status === 'done';
+            const pct = isCopying
+                ? Math.max(0, Math.min(100, Math.round(copyState.progress_pct || 0)))
+                : 0;
+            const rate = isCopying ? (copyState.rate || '') : '';
+            // Fold pct + rate + sent flag into the cache key so the chip text
+            // updates as bytes flow without re-painting on every poll tick.
+            const sep = String.fromCharCode(1);
+            const next = labelArr.join(sep) + sep + (status || '') + sep + pct + sep + rate + sep + (isSent ? '1' : '0');
+            if (el.dataset.cache === next) return;
+            el.dataset.cache = next;
+            el.innerHTML = '';
+            if (isCopying) {
+                const chip = document.createElement('span');
+                chip.className = 'label-chip label-chip--copying';
+                chip.textContent = rate
+                    ? `copying ${pct}% • ${rate}`
+                    : `copying ${pct}%`;
+                el.appendChild(chip);
+            }
+            // Show "sent" from copy_state even when the Copied label is missing
+            // (e.g. cross-worker RPC race or transient Transmission failure).
+            if (isSent && !hasCopiedLabel) {
+                const chip = document.createElement('span');
+                chip.className = 'label-chip label-chip--copied';
+                chip.textContent = '✓ sent';
+                el.appendChild(chip);
+            }
+            labelArr.forEach(l => {
+                const chip = document.createElement('span');
+                if (l === 'Copied') {
+                    chip.className = 'label-chip label-chip--copied';
+                    chip.textContent = '✓ sent';
+                } else {
+                    chip.className = 'label-chip';
+                    chip.textContent = l;
+                }
+                el.appendChild(chip);
+            });
+        }
+
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        function formatBytes(n) {
+            if (!n || n <= 0) return '0 B';
+            return formatSize(n);
+        }
+
+        function formatDuration(secs) {
+            if (!secs || secs <= 0) return '—';
+            const d = Math.floor(secs / 86400);
+            const h = Math.floor((secs % 86400) / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            const s = Math.floor(secs % 60);
+            if (d) return `${d}d ${h}h`;
+            if (h) return `${h}h ${m}m`;
+            if (m) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        function formatDateMaybe(epoch) {
+            if (!epoch || epoch <= 0) return '—';
+            const d = new Date(epoch * 1000);
+            if (isNaN(d.getTime())) return '—';
+            return d.toLocaleString();
+        }
+
+        function toggleExpand(id) {
+            if (expandedIds.has(id)) {
+                expandedIds.delete(id);
+            } else {
+                expandedIds.add(id);
+                fetchDetail(id);
+            }
+            const card = cardsById.get(id);
+            if (card) {
+                card.dataset.expanded = expandedIds.has(id) ? 'true' : 'false';
+                renderExpanded(card, id);
+            }
+            updateDetailPoll();
+        }
+
+        async function fetchDetail(id) {
+            try {
+                const res = await fetch(`/api/torrent/${id}`, { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (res.status === 404) {
+                    expandedIds.delete(id);
+                    detailById.delete(id);
+                    return;
+                }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                if (data && data.ok === false) throw new Error(data.error || 'request failed');
+                detailById.set(id, data);
+                const card = cardsById.get(id);
+                if (card && expandedIds.has(id)) renderExpanded(card, id);
+            } catch (err) {
+                console.error('Detail fetch failed:', err);
+            }
+        }
+
+        // Single batched detail fetch for all currently-expanded cards.
+        // Replaces the previous fan-out where every expanded card kicked off
+        // its own /api/torrent/<id> per poll tick.
+        let detailsBatchBusy = false;
+        async function fetchDetailsBatch() {
+            const ids = Array.from(expandedIds);
+            if (ids.length === 0) return;
+            if (detailsBatchBusy) return;
+            detailsBatchBusy = true;
+            try {
+                const res = await fetch('/api/torrents/details', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ids }),
+                    cache: 'no-store',
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                if (!data || data.ok === false) throw new Error((data && data.error) || 'request failed');
+                const returned = new Set();
+                for (const t of (data.torrents || [])) {
+                    const id = t && t.id;
+                    if (id == null) continue;
+                    returned.add(id);
+                    detailById.set(id, t);
+                    const card = cardsById.get(id);
+                    if (card && expandedIds.has(id)) renderExpanded(card, id);
+                }
+                // Any id we asked for but didn't get back has been removed
+                // from Transmission — collapse it locally.
+                for (const id of ids) {
+                    if (!returned.has(id)) {
+                        expandedIds.delete(id);
+                        detailById.delete(id);
+                    }
+                }
+            } catch (err) {
+                console.error('Detail batch fetch failed:', err);
+            } finally {
+                detailsBatchBusy = false;
+            }
+        }
+
+        function updateDetailPoll() {
+            if (expandedIds.size > 0 && !detailPollHandle && !document.hidden) {
+                detailPollHandle = setInterval(fetchDetailsBatch, DETAIL_POLL_MS);
+            } else if ((expandedIds.size === 0 || document.hidden) && detailPollHandle) {
+                clearInterval(detailPollHandle);
+                detailPollHandle = null;
+            }
+        }
+
+        document.addEventListener('visibilitychange', updateDetailPoll);
+
+        function renderExpanded(card, id) {
+            const wrap = card.querySelector('[data-field="expanded"]');
+            const open = expandedIds.has(id);
+            wrap.hidden = !open;
+            if (!open) {
+                wrap.innerHTML = '';
+                return;
+            }
+            const t = findTorrent(id);
+            const d = detailById.get(id);
+            if (!d) {
+                wrap.innerHTML = `<div class="card-expanded-loading">Loading…</div>`;
+                return;
+            }
+            wrap.innerHTML = buildExpandedHTML(t, d);
+        }
+
+        function buildExpandedHTML(t, d) {
+            const status = (t && t.status) ?? d.status;
+            const isDownloading = status === 3 || status === 4;
+            const isSeeding = status === 5 || status === 6;
+            const isChecking = status === 1 || status === 2;
+            return `
+                ${buildExpandStatsGrid(d, isDownloading, isSeeding, isChecking)}
+                ${buildTrackerBlock(d)}
+                ${buildPeerBlock(d, isDownloading, isSeeding)}
+                ${buildMetaBlock(d)}
+            `;
+        }
+
+        function buildExpandStatsGrid(d, isDl, isSeed, isCheck) {
+            const sizeWhenDone = d.sizeWhenDone || d.totalSize || 0;
+            const have = d.haveValid || 0;
+            const left = d.leftUntilDone || 0;
+            const peers = d.peersConnected || 0;
+            const fromUs = d.peersGettingFromUs || 0;
+            const toUs = d.peersSendingToUs || 0;
+
+            const tiles = [];
+
+            // Role-specific peer tile up front, then a total Peers tile.
+            // Downloading rows surface "who's feeding us" (Seeders);
+            // seeding rows surface "who we're feeding" (Leechers).
+            if (isDl) {
+                tiles.push(tile('Seeders', `${toUs}`,
+                    `<span class="stat-secondary"> of ${peers}</span>`));
+            } else if (isSeed) {
+                tiles.push(tile('Leechers', `${fromUs}`,
+                    `<span class="stat-secondary"> of ${peers}</span>`));
+            } else {
+                tiles.push(tile('Peers', `${peers}`));
+            }
+
+            if (isDl) {
+                tiles.push(tile('Down', formatSpeed(d.rateDownload || 0)));
+                tiles.push(tile('Up', formatSpeed(d.rateUpload || 0)));
+                tiles.push(tile('ETA', formatEta(d.eta)));
+                tiles.push(tile('Have',
+                    formatBytes(have),
+                    `<span class="stat-secondary"> / ${formatBytes(sizeWhenDone)}</span>`));
+                tiles.push(tile('Left', formatBytes(left)));
+                tiles.push(tile('Downloaded total', formatBytes(d.downloadedEver || 0)));
+                tiles.push(tile('Uploaded total', formatBytes(d.uploadedEver || 0)));
+                tiles.push(tile('Ratio', formatRatio(d.uploadRatio)));
+                tiles.push(tile('Elapsed', formatDuration(d.secondsDownloading)));
+                if ((d.corruptEver || 0) > 0) {
+                    tiles.push(tileBad('Corrupt', formatBytes(d.corruptEver)));
+                }
+            } else if (isSeed) {
+                tiles.push(tile('Up', formatSpeed(d.rateUpload || 0)));
+                tiles.push(tile('Ratio', formatRatio(d.uploadRatio)));
+                tiles.push(tile('Uploaded total', formatBytes(d.uploadedEver || 0)));
+                tiles.push(tile('Downloaded total', formatBytes(d.downloadedEver || 0)));
+                tiles.push(tile('Seeding for', formatDuration(d.secondsSeeding)));
+                tiles.push(tile('Last activity', d.activityDate ? formatDateMaybe(d.activityDate) : '—'));
+                tiles.push(tile('Completed', formatDateMaybe(d.doneDate)));
+            } else if (isCheck) {
+                tiles.push(tile('Verifying', `${Math.round((d.percentDone || 0) * 100)}%`));
+                tiles.push(tile('Have', formatBytes(have)));
+                tiles.push(tile('Unchecked', formatBytes(d.haveUnchecked || 0)));
+                tiles.push(tile('Size', formatBytes(sizeWhenDone)));
+            } else {
+                // Stopped / paused.
+                tiles.push(tile('Progress', `${((d.percentDone || 0) * 100).toFixed(1)}%`));
+                tiles.push(tile('Have', formatBytes(have)));
+                tiles.push(tile('Left', formatBytes(left)));
+                tiles.push(tile('Ratio', formatRatio(d.uploadRatio)));
+                tiles.push(tile('Downloaded total', formatBytes(d.downloadedEver || 0)));
+                tiles.push(tile('Uploaded total', formatBytes(d.uploadedEver || 0)));
+                if (d.doneDate) tiles.push(tile('Completed', formatDateMaybe(d.doneDate)));
+            }
+
+            return `<div class="stats-grid">${tiles.join('')}</div>`;
+        }
+
+        function tile(label, primary, secondary) {
+            return `
+                <div class="stat-tile">
+                    <span class="stat-label">${escapeHtml(label)}</span>
+                    <span class="stat-value"><span class="stat-primary">${primary}</span>${secondary || ''}</span>
+                </div>
+            `;
+        }
+        function tileBad(label, primary) {
+            return `
+                <div class="stat-tile stat-tile-bad">
+                    <span class="stat-label">${escapeHtml(label)}</span>
+                    <span class="stat-value"><span class="stat-primary">${primary}</span></span>
+                </div>
+            `;
+        }
+
+        function buildTrackerBlock(d) {
+            const trackers = d.trackerStats || [];
+            if (!trackers.length) return '';
+            const rows = trackers.map(tr => {
+                const ok = tr.lastAnnounceSucceeded;
+                const stateCls = ok ? 'tracker-ok' : 'tracker-err';
+                const stateLabel = ok ? 'OK' : 'ERR';
+                const result = !ok && tr.lastAnnounceResult
+                    ? `<span class="tracker-error-msg">${escapeHtml(tr.lastAnnounceResult)}</span>`
+                    : '';
+                const seeders = tr.seederCount >= 0 ? tr.seederCount : '—';
+                const leechers = tr.leecherCount >= 0 ? tr.leecherCount : '—';
+                return `
+                    <li class="tracker-row">
+                        <span class="tracker-state ${stateCls}">${stateLabel}</span>
+                        <span class="tracker-host" title="${escapeHtml(tr.announce || '')}">${escapeHtml(tr.host || tr.announce || '—')}</span>
+                        <span class="tracker-counts"><span class="tracker-seeders">${seeders}</span>S · <span class="tracker-leechers">${leechers}</span>L</span>
+                        ${result}
+                    </li>
+                `;
+            }).join('');
+            return `
+                <div class="detail-block">
+                    <h4>Trackers <span class="feed-headcount">${trackers.length}</span></h4>
+                    <ul class="tracker-list">${rows}</ul>
+                </div>
+            `;
+        }
+
+        function buildPeerBlock(d, isDl, isSeed) {
+            const peers = d.peers || [];
+            const connected = d.peersConnected || 0;
+            if (!connected && !peers.length) {
+                return `
+                    <div class="detail-block">
+                        <h4>Peers</h4>
+                        <p class="field-hint">No peers connected.</p>
+                    </div>
+                `;
+            }
+
+            if (isSeed) {
+                // Split by who's still downloading vs. complete. Seeders
+                // sitting on a full copy are mostly idle — leechers are
+                // who you're actually feeding.
+                const leechers = peers
+                    .filter(p => (p.progress || 0) < 1.0)
+                    .sort((a, b) => (b.rateToPeer || 0) - (a.rateToPeer || 0));
+                const seeders = peers
+                    .filter(p => (p.progress || 0) >= 1.0)
+                    .sort((a, b) => (b.rateToPeer || 0) - (a.rateToPeer || 0));
+                const groups = [];
+                if (leechers.length) {
+                    groups.push(peerGroup('Leechers', leechers, 20));
+                }
+                if (seeders.length) {
+                    groups.push(peerGroup('Seeders', seeders, 10));
+                }
+                if (!groups.length) {
+                    return `
+                        <div class="detail-block">
+                            <h4>Peers <span class="feed-headcount">${connected}</span></h4>
+                            <p class="field-hint">No peer details available.</p>
+                        </div>
+                    `;
+                }
+                return `
+                    <div class="detail-block">
+                        <h4>Peers <span class="feed-headcount">${connected}</span></h4>
+                        ${groups.join('')}
+                    </div>
+                `;
+            }
+
+            // Downloading / paused / checking: single sorted list.
+            const sorted = peers.slice().sort((a, b) => {
+                return (b.rateToClient + b.rateToPeer) - (a.rateToClient + a.rateToPeer);
+            });
+            const shown = sorted.slice(0, 20);
+            const rows = shown.map(peerRow).join('');
+            const more = peers.length > shown.length
+                ? `<p class="field-hint">Showing top ${shown.length} of ${peers.length} peers.</p>`
+                : '';
+            return `
+                <div class="detail-block">
+                    <h4>Peers <span class="feed-headcount">${connected}</span></h4>
+                    <ul class="peer-list">${rows}</ul>
+                    ${more}
+                </div>
+            `;
+        }
+
+        function peerGroup(label, list, limit) {
+            const shown = list.slice(0, limit);
+            const rows = shown.map(peerRow).join('');
+            const more = list.length > shown.length
+                ? `<p class="field-hint">Showing top ${shown.length} of ${list.length} ${label.toLowerCase()}.</p>`
+                : '';
+            return `
+                <div class="peer-group">
+                    <h5 class="peer-group-header">${label} <span class="feed-headcount">${list.length}</span></h5>
+                    <ul class="peer-list">${rows}</ul>
+                    ${more}
+                </div>
+            `;
+        }
+
+        function peerRow(p) {
+            const dir = p.isIncoming ? 'in' : 'out';
+            const enc = p.isEncrypted ? '🔒' : '';
+            const dl = p.rateToClient > 0 ? formatSpeed(p.rateToClient) : '—';
+            const ul = p.rateToPeer > 0 ? formatSpeed(p.rateToPeer) : '—';
+            const pct = `${Math.round((p.progress || 0) * 100)}%`;
+            return `
+                <li class="peer-row">
+                    <span class="peer-dir peer-dir-${dir}">${dir}</span>
+                    <span class="peer-addr" title="${escapeHtml(p.address)}">${escapeHtml(p.address)}</span>
+                    <span class="peer-client" title="${escapeHtml(p.clientName || '')}">${escapeHtml(p.clientName || '—')}</span>
+                    <span class="peer-progress">${pct}</span>
+                    <span class="peer-rate" title="from peer">↓ ${dl}</span>
+                    <span class="peer-rate" title="to peer">↑ ${ul}</span>
+                    <span class="peer-enc">${enc}</span>
+                </li>
+            `;
+        }
+
+        function buildMetaBlock(d) {
+            const rows = [];
+            if (d.custom_name) {
+                rows.push(['Default name', escapeHtml(d.default_name || d.name)]);
+            }
+            if (d.downloadDir) rows.push(['Location', escapeHtml(d.downloadDir)]);
+            if (d.addedDate) rows.push(['Added', escapeHtml(formatDateMaybe(d.addedDate))]);
+            if (d.dateCreated) rows.push(['Created', escapeHtml(formatDateMaybe(d.dateCreated))]);
+            if (d.creator) rows.push(['Creator', escapeHtml(d.creator)]);
+            if (typeof d.isPrivate === 'boolean') {
+                rows.push(['Privacy', d.isPrivate ? 'Private' : 'Public']);
+            }
+            if (d.pieceCount) {
+                rows.push(['Pieces', `${d.pieceCount} × ${formatBytes(d.pieceSize || 0)}`]);
+            }
+            if (d.comment) rows.push(['Comment', escapeHtml(d.comment)]);
+            if (!rows.length) return '';
+            return `
+                <div class="detail-block detail-block-meta">
+                    <dl class="meta-list">
+                        ${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}
+                    </dl>
+                </div>
+            `;
+        }
+
+        function updateCard(card, t) {
+            const cls = STATUS_CLASS[t.status] || 'paused';
+            if (card.dataset.status !== cls) card.dataset.status = cls;
+            card.dataset.expanded = expandedIds.has(t.id) ? 'true' : 'false';
+
+            const pct = Math.max(0, Math.min(1, t.percentDone || 0));
+            const isComplete = pct >= 1;
+            const completeAttr = isComplete ? 'true' : 'false';
+            if (card.dataset.complete !== completeAttr) card.dataset.complete = completeAttr;
+
+            // Three lifecycle states for completed torrents:
+            //   ready  → downloaded but not yet sent (action item)
+            //   copied → already sent to media server (faded)
+            //   neither → still downloading / paused / errored
+            const labelsArr = Array.isArray(t.labels) ? t.labels : [];
+            const copyState = copyStatesById.get(t.id);
+            const copyStatus = copyState && copyState.status;
+            // Trust copy_state.status === 'done' even if the Transmission
+            // "Copied" label never landed (cross-worker RPC race / transient
+            // failure). Same fallback as renderLabels.
+            const isCopied = labelsArr.includes('Copied') || copyStatus === 'done';
+            const isCopying = copyStatus === 'copying';
+            const isReady = isComplete && !isCopied && !isCopying;
+            const readyAttr = isReady ? 'true' : 'false';
+            const copiedAttr = isCopied ? 'true' : 'false';
+            if (card.dataset.ready !== readyAttr) card.dataset.ready = readyAttr;
+            if (card.dataset.copied !== copiedAttr) card.dataset.copied = copiedAttr;
+
+            const sendBtn = card.querySelector('[data-field="send-btn"]');
+            if (sendBtn) sendBtn.hidden = !isReady;
+
+            const fill = card.querySelector('.progress-fill');
+            const widthStr = (pct * 100).toFixed(1) + '%';
+            if (fill.style.width !== widthStr) fill.style.width = widthStr;
+
+            const displayName = t.custom_name || t.name;
+            const name = card.querySelector('.card-name');
+            if (name.textContent !== displayName) {
+                name.textContent = displayName;
+                name.title = t.custom_name
+                    ? `${t.custom_name} — default: ${t.name}`
+                    : displayName;
+            }
+
+            renderLabels(card, t.labels, copyStatesById.get(t.id));
+            renderError(card, t);
+            setField(card, 'down', formatSpeed(t.rateDownload));
+            setField(card, 'up', formatSpeed(t.rateUpload));
+            setField(card, 'ratio', formatRatio(t.uploadRatio));
+            setField(card, 'eta', formatEta(t.eta));
+            setField(card, 'size', formatSize(t.totalSize));
+            setField(card, 'status', STATUS_LABELS[t.status] || 'Unknown');
+
+            // Downloading rows surface "who's feeding us" (Seeders);
+            // seeding rows surface "who we're feeding" (Leechers). ETA is
+            // meaningless once we're at 100% — hide it for any complete
+            // torrent rather than showing "Unknown".
+            const isDl = t.status === 3 || t.status === 4;
+            const isSeed = t.status === 5 || t.status === 6;
+            const connected = t.peersConnected || 0;
+            const sToUs = t.peersSendingToUs || 0;
+            const gFromUs = t.peersGettingFromUs || 0;
+
+            setField(card, 'seeders', `${sToUs}/${connected}`);
+            setField(card, 'leechers', `${gFromUs}/${connected}`);
+            setMeta(card, 'seeders', isDl);
+            setMeta(card, 'leechers', isSeed);
+            setMeta(card, 'eta', !isComplete);
+        }
+
+        function setMeta(card, name, show) {
+            const el = card.querySelector(`[data-meta="${name}"]`);
+            if (el) el.hidden = !show;
+        }
+
+        function renderError(card, t) {
+            const box = card.querySelector('[data-field="error-box"]');
+            const code = t.error || 0;
+            const msg = (t.errorString || '').trim();
+            if (!code && !msg) {
+                if (!box.hidden) {
+                    box.hidden = true;
+                    box.removeAttribute('data-kind');
+                }
+                return;
+            }
+            const kind = ERROR_KIND[code] || { tag: 'Error', cls: 'err' };
+            if (box.dataset.kind !== kind.cls) box.dataset.kind = kind.cls;
+            setField(card, 'error-tag', kind.tag);
+            setField(card, 'error-msg', msg || '(no message)');
+            box.hidden = false;
+        }
+
+        // Sort priority pulls "ready to send" (completed, not yet copied)
+        // above seeding/copied torrents so new completions don't get buried
+        // under the long tail of cards still seeding. Lower number sorts first.
+        function sortRank(t) {
+            const pct = t.percentDone || 0;
+            const isComplete = pct >= 1;
+            const copyState = copyStatesById.get(t.id);
+            const labelCopied = Array.isArray(t.labels) && t.labels.includes('Copied');
+            const stateDone = copyState && copyState.status === 'done';
+            const isCopied = labelCopied || stateDone;
+            const status = t.status;
+            // Downloading / pending download.
+            if (status === 3 || status === 4) return 0;
+            // Verifying.
+            if (status === 1 || status === 2) return 1;
+            // Completed but not yet sent — the user's actionable bucket.
+            if (isComplete && !isCopied) return 2;
+            // Seeding / done & copied — quieter.
+            if (status === 5 || status === 6) return 3;
+            // Paused / stopped.
+            return 4;
+        }
+
+        // Split bucket: cards land left while still downloading (or paused
+        // mid-download), right once fully downloaded (seeding or done-stopped).
+        // Mobile flattens both columns into a single list via CSS.
+        function bucketFor(t) {
+            return (t.percentDone || 0) >= 1 ? 'right' : 'left';
+        }
+
+        // Unknown/negative ETAs bubble to the bottom of the "soonest first"
+        // sort — a torrent with no ETA is the least actionable, not the most.
+        function etaSortValue(eta) {
+            if (eta === null || eta === undefined || eta < 0) return Number.POSITIVE_INFINITY;
+            return eta;
+        }
+
+        function nameOf(t) {
+            return (t.custom_name || t.name || '').toLowerCase();
+        }
+
+        function defaultComparator(a, b) {
+            const ra = sortRank(a);
+            const rb = sortRank(b);
+            if (ra !== rb) return ra - rb;
+            return (b.addedDate || 0) - (a.addedDate || 0);
+        }
+
+        function getComparator(sortKey) {
+            switch (sortKey) {
+                case 'progress-desc':
+                    return (a, b) => (b.percentDone || 0) - (a.percentDone || 0);
+                case 'progress-asc':
+                    return (a, b) => (a.percentDone || 0) - (b.percentDone || 0);
+                case 'size-desc':
+                    return (a, b) => (b.totalSize || 0) - (a.totalSize || 0);
+                case 'size-asc':
+                    return (a, b) => (a.totalSize || 0) - (b.totalSize || 0);
+                case 'eta-asc':
+                    return (a, b) => etaSortValue(a.eta) - etaSortValue(b.eta);
+                case 'down-desc':
+                    return (a, b) => (b.rateDownload || 0) - (a.rateDownload || 0);
+                case 'up-desc':
+                    return (a, b) => (b.rateUpload || 0) - (a.rateUpload || 0);
+                case 'ratio-desc':
+                    return (a, b) => (b.uploadRatio || 0) - (a.uploadRatio || 0);
+                case 'ratio-asc':
+                    return (a, b) => (a.uploadRatio || 0) - (b.uploadRatio || 0);
+                case 'done-desc':
+                    return (a, b) => (b.doneDate || 0) - (a.doneDate || 0);
+                case 'added-desc':
+                    return (a, b) => (b.addedDate || 0) - (a.addedDate || 0);
+                case 'added-asc':
+                    return (a, b) => (a.addedDate || 0) - (b.addedDate || 0);
+                case 'name-asc':
+                    return (a, b) => nameOf(a).localeCompare(nameOf(b));
+                default:
+                    return defaultComparator;
+            }
+        }
+
+        // Ties within the chosen sort fall back to the default ordering so
+        // rows don't jitter around each poll when the primary field is equal.
+        function makeTieBrokenComparator(sortKey) {
+            const primary = getComparator(sortKey);
+            if (sortKey === 'default') return primary;
+            return (a, b) => {
+                const r = primary(a, b);
+                if (r !== 0) return r;
+                return defaultComparator(a, b);
+            };
+        }
+
+        function render() {
+            const leftList = document.getElementById('torrents-left');
+            const rightList = document.getElementById('torrents-right');
+            const empty = document.getElementById('empty');
+            const filterFn = FILTERS[activeFilter] || FILTERS.all;
+            const seen = new Set();
+            let visibleCount = 0;
+            let leftVisible = 0;
+            let rightVisible = 0;
+
+            // Bucket first, then sort each column with its own comparator so
+            // the "Downloading / Paused" and "Downloaded / Seeding" columns
+            // can be ordered independently (Size vs. Ratio, etc.).
+            const leftTorrents = [];
+            const rightTorrents = [];
+            for (const t of currentTorrents) {
+                if (bucketFor(t) === 'right') rightTorrents.push(t);
+                else leftTorrents.push(t);
+            }
+            leftTorrents.sort(makeTieBrokenComparator(columnSorts.left));
+            rightTorrents.sort(makeTieBrokenComparator(columnSorts.right));
+
+            // Mobile/tablet flattens both lists into one via CSS. The DOM
+            // still lives in two lists (left first, right second), so on
+            // mobile the whole page reads top-to-bottom as left-then-right.
+            const ordered = leftTorrents.concat(rightTorrents);
+
+            let prevLeft = null;
+            let prevRight = null;
+            for (const t of ordered) {
+                let card = cardsById.get(t.id);
+                if (!card) {
+                    card = buildCard(t);
+                    cardsById.set(t.id, card);
+                }
+                const bucket = bucketFor(t);
+                const targetList = bucket === 'right' ? rightList : leftList;
+                const prevInBucket = bucket === 'right' ? prevRight : prevLeft;
+                const expectedNext = prevInBucket ? prevInBucket.nextSibling : targetList.firstChild;
+                if (card.parentNode !== targetList || expectedNext !== card) {
+                    targetList.insertBefore(card, expectedNext);
+                }
+                updateCard(card, t);
+                syncCardSelection(card, t.id);
+                const visible = filterFn(t);
+                card.hidden = !visible;
+                if (visible) {
+                    visibleCount++;
+                    if (bucket === 'right') rightVisible++;
+                    else leftVisible++;
+                }
+                seen.add(t.id);
+                if (bucket === 'right') prevRight = card;
+                else prevLeft = card;
+            }
+
+            for (const [id, card] of cardsById) {
+                if (!seen.has(id)) {
+                    card.remove();
+                    cardsById.delete(id);
+                    expandedIds.delete(id);
+                    detailById.delete(id);
+                }
+            }
+            updateDetailPoll();
+
+            empty.hidden = visibleCount > 0;
+            document.querySelector('[data-count="left"]').textContent = leftVisible;
+            document.querySelector('[data-count="right"]').textContent = rightVisible;
+            updateCounts();
+        }
+
+        function updateCounts() {
+            for (const key of Object.keys(FILTERS)) {
+                const el = document.querySelector(`[data-count="${key}"]`);
+                if (!el) continue;
+                el.textContent = currentTorrents.filter(FILTERS[key]).length;
+            }
+        }
+
+        function removeTorrentLocally(id) {
+            const card = cardsById.get(id);
+            if (card) {
+                card.remove();
+                cardsById.delete(id);
+            }
+            expandedIds.delete(id);
+            detailById.delete(id);
+            selectedIds.delete(id);
+            updateDetailPoll();
+            currentTorrents = currentTorrents.filter(t => t.id !== id);
+            // Re-run the full render so column counts, per-column empty
+            // placeholders, and the global empty state all stay in sync.
+            render();
+        }
+
+        function findTorrent(id) {
+            return currentTorrents.find(t => t.id === id);
+        }
+
+        // ----- live indicator + polling -----
+
+        function setLive(ok) {
+            const dot = document.querySelector('.live-dot');
+            const label = document.querySelector('.live-label');
+            dot.dataset.state = ok ? 'ok' : 'err';
+            label.textContent = ok ? 'Live' : 'Stale';
+        }
+
+        // In-flight guard: setInterval fires on schedule even when the
+        // previous request hasn't finished, so a slow backend used to pile
+        // up overlapping requests until gunicorn's threads were saturated.
+        let pollBusy = false;
+        async function poll() {
+            if (pollBusy) return;
+            pollBusy = true;
+            try {
+                const res = await fetch('/api/torrents');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                currentTorrents = Array.isArray(data) ? data : [];
+                render();
+                setLive(true);
+            } catch (err) {
+                console.error('Poll failed:', err);
+                setLive(false);
+            } finally {
+                pollBusy = false;
+            }
+        }
+
+        const storageBarEl = document.getElementById('storage-bar');
+        const storageTextEl = document.getElementById('storage-text');
+        const storageStatsEl = document.getElementById('storage-stats');
+        const mediaStorageBarEl = document.getElementById('media-storage-bar');
+        const mediaStorageTextEl = document.getElementById('media-storage-text');
+        const mediaStorageStatsEl = document.getElementById('media-storage-stats');
+        const mullvadEl = document.getElementById('mullvad-days');
+        const mullvadTextEl = document.getElementById('mullvad-days-text');
+
+        let copyStatesBusy = false;
+        async function pollCopyStates() {
+            if (copyStatesBusy) return;
+            copyStatesBusy = true;
+            try {
+                const res = await fetch('/api/copy/states', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+
+                // Build a small fingerprint per id of the fields updateCard
+                // actually cares about; only re-render cards whose
+                // fingerprint changed. Idle dashboards used to repaint every
+                // card every 5s for no reason.
+                const nextFingerprints = new Map();
+                const nextStates = new Map();
+                if (data && typeof data === 'object') {
+                    for (const [k, v] of Object.entries(data)) {
+                        const id = parseInt(k, 10);
+                        if (Number.isNaN(id) || !v) continue;
+                        nextStates.set(id, v);
+                        nextFingerprints.set(id, copyStateFingerprint(v));
+                    }
+                }
+
+                const changedIds = new Set();
+                for (const [id, fp] of nextFingerprints) {
+                    if (copyStateFingerprints.get(id) !== fp) changedIds.add(id);
+                }
+                for (const id of copyStateFingerprints.keys()) {
+                    if (!nextFingerprints.has(id)) changedIds.add(id);
+                }
+
+                copyStatesById = nextStates;
+                copyStateFingerprints = nextFingerprints;
+
+                for (const id of changedIds) {
+                    const card = cardsById.get(id);
+                    const t = findTorrent(id);
+                    if (card && t) updateCard(card, t);
+                }
+            } catch (_) {} finally {
+                copyStatesBusy = false;
+            }
+        }
+
+        // Two states with the same status/progress/rate/sent flag are
+        // visually identical — no point re-painting the card. Keep this in
+        // sync with the copy_state fields renderLabels/updateCard read.
+        function copyStateFingerprint(s) {
+            if (!s) return '';
+            return [
+                s.status || '',
+                Math.round(s.progress_pct || 0),
+                s.rate || '',
+                s.deleted ? '1' : '0',
+                s.tailscale_auth_url ? '1' : '0',
+            ].join('|');
+        }
+
+        let storageBusy = false;
+        async function pollStorage() {
+            if (storageBusy) return;
+            storageBusy = true;
+            try {
+                const res = await fetch('/api/storage', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.ok === false) return;
+                const disk = data.disk || {};
+                const pct = Math.max(0, Math.min(100, disk.percent || 0));
+                storageBarEl.style.width = pct.toFixed(1) + '%';
+                let state = 'ok';
+                if (pct >= 90) state = 'crit';
+                else if (pct >= 75) state = 'warn';
+                storageBarEl.dataset.state = state;
+                storageTextEl.textContent =
+                    `${formatSize(disk.free)} free of ${formatSize(disk.total)} (${pct.toFixed(0)}%)`;
+                if (disk.path) storageStatsEl.title = `${disk.path} — ${formatSize(disk.used)} used`;
+            } catch (_) {} finally {
+                storageBusy = false;
+            }
+        }
+
+        // refresh=1 tells the server to bypass its 10-minute df cache. Without
+        // this, a "manual refresh" click within the cache window would just
+        // re-render the same number and feel broken.
+        // The server probes in the background and answers instantly with
+        // `refreshing: true` while a probe is in flight — re-poll shortly so
+        // the fresh number lands without waiting for the 10-min cadence.
+        let mediaStorageRetryTimer = null;
+        async function pollMediaStorage({ force = false } = {}) {
+            try {
+                const url = force ? '/api/media-storage?refresh=1' : '/api/media-storage';
+                const res = await fetch(url, { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.refreshing && !mediaStorageRetryTimer) {
+                    mediaStorageRetryTimer = setTimeout(() => {
+                        mediaStorageRetryTimer = null;
+                        pollMediaStorage();
+                    }, 4000);
+                }
+                // Hide when no media destination is configured — no point
+                // showing an empty bar to users who don't use the copy flow.
+                if (!data.configured) {
+                    mediaStorageStatsEl.hidden = true;
+                    return;
+                }
+                if (data.ok === false) {
+                    mediaStorageStatsEl.hidden = false;
+                    mediaStorageTextEl.textContent = 'unreachable';
+                    mediaStorageStatsEl.title = `Media server: ${data.error || 'unreachable'}`;
+                    mediaStorageBarEl.style.width = '0%';
+                    return;
+                }
+                const disk = data.disk || {};
+                const pct = Math.max(0, Math.min(100, disk.percent || 0));
+                mediaStorageStatsEl.hidden = false;
+                mediaStorageBarEl.style.width = pct.toFixed(1) + '%';
+                let state = 'ok';
+                if (pct >= 90) state = 'crit';
+                else if (pct >= 75) state = 'warn';
+                mediaStorageBarEl.dataset.state = state;
+                mediaStorageTextEl.textContent =
+                    `${formatSize(disk.free)} free of ${formatSize(disk.total)} (${pct.toFixed(0)}%)`;
+                if (disk.host && disk.path) {
+                    mediaStorageStatsEl.title =
+                        `${disk.host}:${disk.path} — ${formatSize(disk.used)} used`;
+                }
+            } catch (_) {}
+        }
+
+        let mullvadRetryTimer = null;
+        async function pollMullvad() {
+            try {
+                const res = await fetch('/api/mullvad', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.refreshing && !mullvadRetryTimer) {
+                    mullvadRetryTimer = setTimeout(() => {
+                        mullvadRetryTimer = null;
+                        pollMullvad();
+                    }, 4000);
+                }
+                if (!data.configured) { mullvadEl.hidden = true; return; }
+                mullvadEl.hidden = false;
+                if (data.ok === false) {
+                    mullvadTextEl.textContent = 'err';
+                    mullvadEl.dataset.state = 'warn';
+                    mullvadEl.title = `VPN: ${data.error || 'unreachable'}`;
+                    return;
+                }
+                const days = data.days_remaining;
+                mullvadTextEl.textContent = days === 1 ? '1 day' : `${days}d`;
+                mullvadEl.dataset.state = days <= 7 ? 'crit' : days <= 14 ? 'warn' : 'ok';
+                const expiry = data.expiry ? new Date(data.expiry).toLocaleDateString() : '';
+                mullvadEl.title = expiry ? `Mullvad expires ${expiry}` : 'Mullvad VPN';
+            } catch (_) {}
+        }
+
+        // Click handlers for the manual refresh buttons. The button sits
+        // inside an <a> wrapper, so we have to suppress the link navigation.
+        function wireStorageRefresh(buttonEl, pollFn, opts = {}) {
+            if (!buttonEl) return;
+            buttonEl.addEventListener('click', async (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (buttonEl.disabled) return;
+                buttonEl.disabled = true;
+                buttonEl.dataset.spinning = '1';
+                try {
+                    await pollFn(opts);
+                } finally {
+                    buttonEl.dataset.spinning = '0';
+                    buttonEl.disabled = false;
+                }
+            });
+        }
+
+        wireStorageRefresh(document.getElementById('storage-refresh'), pollStorage);
+        wireStorageRefresh(document.getElementById('media-storage-refresh'), pollMediaStorage, { force: true });
+
+        // ----- toast -----
+
+        function toast(message, type = 'info') {
+            const container = document.getElementById('toasts');
+            const el = document.createElement('div');
+            el.className = `toast toast-${type}`;
+            el.textContent = message;
+            container.appendChild(el);
+            requestAnimationFrame(() => el.classList.add('toast-show'));
+            setTimeout(() => {
+                el.classList.remove('toast-show');
+                el.classList.add('toast-hide');
+                setTimeout(() => el.remove(), 300);
+            }, 2700);
+        }
+
+        // ----- modal helpers -----
+
+        function openModal(id) {
+            document.getElementById(id).hidden = false;
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).hidden = true;
+        }
+
+        document.addEventListener('click', e => {
+            const closeId = e.target.dataset && e.target.dataset.close;
+            if (closeId) closeModal(closeId);
+        });
+
+        document.querySelectorAll('.modal-overlay').forEach(ov => {
+            ov.addEventListener('click', e => {
+                if (e.target === ov) closeModal(ov.id);
+            });
+        });
+
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal-overlay:not([hidden])').forEach(ov => closeModal(ov.id));
+                hideCtxMenu();
+            }
+        });
+
+        // ----- context menu -----
+
+        const ctxMenu = document.getElementById('ctx-menu');
+        let ctxOpenForId = null;
+
+        function toggleCtxMenu(card, button) {
+            const id = parseInt(card.dataset.id, 10);
+            if (ctxOpenForId === id) { hideCtxMenu(); return; }
+            showCtxMenu(card, button, id);
+        }
+
+        function showCtxMenu(card, button, id) {
+            const t = findTorrent(id);
+            if (!t) return;
+            ctxOpenForId = id;
+            ctxMenu.dataset.torrentId = id;
+
+            const startBtn = ctxMenu.querySelector('[data-action="start"]');
+            const stopBtn = ctxMenu.querySelector('[data-action="stop"]');
+            const unloadBtn = ctxMenu.querySelector('[data-action="unload"]');
+            startBtn.disabled = (t.status === 4 || t.status === 6);
+            stopBtn.disabled = (t.status === 0);
+            unloadBtn.disabled = (t.status !== 0);
+
+            ctxMenu.hidden = false;
+            ctxMenu.style.visibility = 'hidden';
+            const rect = button.getBoundingClientRect();
+            const menuRect = ctxMenu.getBoundingClientRect();
+            let top = rect.bottom + 4;
+            let left = rect.right - menuRect.width;
+            if (top + menuRect.height > window.innerHeight - 8) {
+                top = rect.top - menuRect.height - 4;
+            }
+            if (left < 8) left = 8;
+            ctxMenu.style.top = top + 'px';
+            ctxMenu.style.left = left + 'px';
+            ctxMenu.style.visibility = '';
+        }
+
+        function hideCtxMenu() {
+            ctxMenu.hidden = true;
+            ctxOpenForId = null;
+        }
+
+        document.addEventListener('click', e => {
+            if (!ctxMenu.contains(e.target)) hideCtxMenu();
+        });
+
+        ctxMenu.addEventListener('click', e => {
+            const item = e.target.closest('.ctx-item');
+            if (!item || item.disabled) return;
+            const action = item.dataset.action;
+            const id = parseInt(ctxMenu.dataset.torrentId, 10);
+            hideCtxMenu();
+            handleAction(action, id);
+        });
+
+        // ----- actions -----
+
+        async function postJson(url, body) {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: body ? { 'Content-Type': 'application/json' } : {},
+                body: body ? JSON.stringify(body) : undefined,
+            });
+            if (res.status === 401) {
+                unauthorizedRedirect();
+                throw new Error('Session expired');
+            }
+            let data = null;
+            try { data = await res.json(); } catch (_) {}
+            if (!res.ok || (data && data.ok === false)) {
+                const msg = (data && data.error) || ('HTTP ' + res.status);
+                const err = new Error(msg);
+                err.payload = data;
+                throw err;
+            }
+            return data;
+        }
+
+        function handleAction(action, id) {
+            const t = findTorrent(id);
+            if (!t) return;
+            switch (action) {
+                case 'start':
+                    doStart(id, t);
+                    break;
+                case 'stop':
+                    doStop(id, t);
+                    break;
+                case 'rename':
+                    openRenameModal(t);
+                    break;
+                case 'labels':
+                    openLabelsModal(t);
+                    break;
+                case 'copy':
+                    openCopyModal(t);
+                    break;
+                case 'verify':
+                    openConfirm({
+                        title: 'Verify local data',
+                        body: 'Re-check every piece of this torrent against its expected hashes. Transmission will pause the torrent and any corrupt pieces will be re-downloaded.',
+                        target: t.name,
+                        danger: false,
+                        confirmLabel: 'Verify',
+                        onConfirm: () => doVerify(id, t),
+                    });
+                    break;
+                case 'unload':
+                    openConfirm({
+                        title: 'Unload torrent',
+                        body: 'Remove this torrent from Transmission but keep its magnet link saved on the server. Local files stay on disk. You can re-add and start it anytime from the Unloaded panel at the bottom of this page.',
+                        target: t.name,
+                        danger: false,
+                        confirmLabel: 'Unload',
+                        onConfirm: () => doUnload(id, t),
+                    });
+                    break;
+                case 'remove':
+                    openConfirm({
+                        title: 'Remove torrent',
+                        body: 'Remove this torrent from Transmission? The downloaded files will be kept on disk.',
+                        target: t.name,
+                        danger: false,
+                        confirmLabel: 'Remove',
+                        onConfirm: () => doRemove(id, t, false),
+                    });
+                    break;
+                case 'delete':
+                    openConfirm({
+                        title: 'Remove and delete files',
+                        body: 'Remove this torrent and permanently delete its downloaded files from disk. This cannot be undone.',
+                        target: t.name,
+                        danger: true,
+                        confirmLabel: 'Delete files',
+                        onConfirm: () => doRemove(id, t, true),
+                    });
+                    break;
+            }
+        }
+
+        // ----- multi-select (scoped per column) -----
+
+        let selectColumn = null; // 'left' | 'right' | null
+        const selectedIds = new Set();
+
+        function cardColumn(id) {
+            const t = findTorrent(id);
+            return t ? bucketFor(t) : null;
+        }
+
+        function enterSelectMode(column) {
+            if (selectColumn === column) return;
+            if (selectColumn) exitSelectMode();
+            selectColumn = column;
+            document.body.classList.add(`select-mode-${column}`);
+            document.querySelectorAll('.column-select-btn').forEach(b => {
+                b.classList.toggle('column-select-btn--active', b.dataset.selectColumn === column);
+            });
+            document.getElementById('bulk-bar').hidden = false;
+            document.getElementById('bulk-bar').dataset.column = column;
+            document.getElementById('bulk-scope').textContent = column === 'left'
+                ? 'Downloading / Paused'
+                : 'Downloaded / Seeding';
+            for (const [id, card] of cardsById) {
+                const wrap = card.querySelector('[data-field="check-wrap"]');
+                if (!wrap) continue;
+                wrap.hidden = cardColumn(id) !== column;
+            }
+            hideCtxMenu();
+            updateBulkBar();
+        }
+
+        function exitSelectMode() {
+            if (!selectColumn) return;
+            document.body.classList.remove(`select-mode-${selectColumn}`);
+            selectColumn = null;
+            document.querySelectorAll('.column-select-btn').forEach(b => {
+                b.classList.remove('column-select-btn--active');
+            });
+            document.getElementById('bulk-bar').hidden = true;
+            selectedIds.clear();
+            for (const card of cardsById.values()) {
+                card.querySelector('[data-field="check-wrap"]').hidden = true;
+                const cb = card.querySelector('[data-field="check"]');
+                if (cb) cb.checked = false;
+                card.dataset.selected = 'false';
+            }
+        }
+
+        function setSelected(id, on) {
+            if (!selectColumn) return;
+            if (cardColumn(id) !== selectColumn) return;
+            if (on) selectedIds.add(id);
+            else selectedIds.delete(id);
+            const card = cardsById.get(id);
+            if (card) {
+                card.dataset.selected = on ? 'true' : 'false';
+                const cb = card.querySelector('[data-field="check"]');
+                if (cb && cb.checked !== on) cb.checked = on;
+            }
+            updateBulkBar();
+        }
+
+        function toggleSelection(id) {
+            setSelected(id, !selectedIds.has(id));
+        }
+
+        function updateBulkBar() {
+            const n = selectedIds.size;
+            document.getElementById('bulk-count').textContent = `${n} selected`;
+            const bar = document.getElementById('bulk-bar');
+            bar.querySelectorAll('.bulk-bar-actions .btn[data-bulk]').forEach(b => {
+                b.disabled = n === 0;
+            });
+        }
+
+        function selectedTorrents() {
+            const out = [];
+            for (const id of selectedIds) {
+                const t = findTorrent(id);
+                if (t) out.push(t);
+            }
+            return out;
+        }
+
+        function selectAllVisible() {
+            if (!selectColumn) return;
+            for (const [id, card] of cardsById) {
+                if (card.hidden) continue;
+                if (cardColumn(id) !== selectColumn) continue;
+                selectedIds.add(id);
+                card.dataset.selected = 'true';
+                const cb = card.querySelector('[data-field="check"]');
+                if (cb) cb.checked = true;
+            }
+            updateBulkBar();
+        }
+
+        function clearSelection() {
+            for (const id of Array.from(selectedIds)) {
+                setSelected(id, false);
+            }
+        }
+
+        // Reapply select-mode visibility whenever a card is rendered. Only
+        // cards in the active column show a checkbox; if a card's bucket
+        // changes (e.g. finished downloading), it drops out of the current
+        // selection automatically.
+        function syncCardSelection(card, id) {
+            const wrap = card.querySelector('[data-field="check-wrap"]');
+            if (!wrap) return;
+            const col = cardColumn(id);
+            const active = selectColumn && col === selectColumn;
+            wrap.hidden = !active;
+            if (!active && selectedIds.has(id)) {
+                selectedIds.delete(id);
+                updateBulkBar();
+            }
+            const on = active && selectedIds.has(id);
+            const cb = card.querySelector('[data-field="check"]');
+            if (cb) cb.checked = on;
+            card.dataset.selected = on ? 'true' : 'false';
+        }
+
+        document.querySelectorAll('.column-select-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const col = btn.dataset.selectColumn;
+                if (selectColumn === col) exitSelectMode();
+                else enterSelectMode(col);
+            });
+        });
+        document.getElementById('bulk-cancel').addEventListener('click', exitSelectMode);
+        document.getElementById('bulk-clear').addEventListener('click', clearSelection);
+        document.getElementById('bulk-select-all').addEventListener('click', selectAllVisible);
+
+        document.querySelectorAll('#bulk-bar [data-bulk]').forEach(btn => {
+            btn.addEventListener('click', () => handleBulk(btn.dataset.bulk));
+        });
+
+        function handleBulk(action) {
+            const targets = selectedTorrents();
+            if (targets.length === 0) return;
+            switch (action) {
+                case 'start':
+                    runBulk(targets, id => postJson(`/api/torrent/${id}/start`), 'Started', 'Start');
+                    break;
+                case 'stop':
+                    runBulk(targets, id => postJson(`/api/torrent/${id}/stop`), 'Stopped', 'Stop');
+                    break;
+                case 'verify':
+                    openConfirm({
+                        title: `Verify ${targets.length} torrent${targets.length === 1 ? '' : 's'}`,
+                        body: 'Re-check every piece of the selected torrents against their expected hashes. Transmission will pause them and re-download any corrupt pieces.',
+                        target: bulkTargetSummary(targets),
+                        danger: false,
+                        confirmLabel: 'Verify',
+                        onConfirm: () => runBulk(targets, id => postJson(`/api/torrent/${id}/verify`), 'Verifying', 'Verify'),
+                    });
+                    break;
+                case 'unload': {
+                    // Only stopped torrents can be unloaded; filter here so
+                    // the confirm dialog reflects what will actually happen.
+                    const stopped = targets.filter(t => t.status === 0);
+                    if (stopped.length === 0) {
+                        toast('Only stopped torrents can be unloaded', 'warn');
+                        break;
+                    }
+                    const skipped = targets.length - stopped.length;
+                    openConfirm({
+                        title: `Unload ${stopped.length} torrent${stopped.length === 1 ? '' : 's'}`,
+                        body: 'Remove the selected stopped torrents from Transmission but keep their magnet links saved on the server. Local files stay on disk.'
+                            + (skipped ? ` ${skipped} running torrent${skipped === 1 ? '' : 's'} will be skipped.` : ''),
+                        target: bulkTargetSummary(stopped),
+                        danger: false,
+                        confirmLabel: 'Unload',
+                        onConfirm: () => runBulk(stopped, id => postJson(`/api/torrent/${id}/unload`), 'Unloaded', 'Unload', { removes: true }).then(loadUnloaded),
+                    });
+                    break;
+                }
+                case 'remove':
+                    openConfirm({
+                        title: `Remove ${targets.length} torrent${targets.length === 1 ? '' : 's'}`,
+                        body: 'Remove the selected torrents from Transmission? Downloaded files stay on disk.',
+                        target: bulkTargetSummary(targets),
+                        danger: false,
+                        confirmLabel: 'Remove',
+                        onConfirm: () => runBulk(targets, id => postJson(`/api/torrent/${id}/remove`), 'Removed', 'Remove', { removes: true }),
+                    });
+                    break;
+                case 'delete':
+                    openConfirm({
+                        title: `Delete ${targets.length} torrent${targets.length === 1 ? '' : 's'}`,
+                        body: 'Remove the selected torrents AND permanently delete their downloaded files from disk. This cannot be undone.',
+                        target: bulkTargetSummary(targets),
+                        danger: true,
+                        confirmLabel: 'Delete files',
+                        onConfirm: () => runBulk(targets, id => postJson(`/api/torrent/${id}/delete`), 'Deleted', 'Delete', { removes: true }),
+                    });
+                    break;
+            }
+        }
+
+        function bulkTargetSummary(targets) {
+            const MAX = 5;
+            const names = targets.slice(0, MAX).map(t => t.custom_name || t.name);
+            if (targets.length > MAX) names.push(`…and ${targets.length - MAX} more`);
+            return names.join('\n');
+        }
+
+        // Run `call(id)` for every selected torrent. `verbPast` is a past-tense
+        // verb for the success toast ("Started"), `verbFail` labels failures.
+        // When `removes` is true, cards for successful ids are removed from the
+        // local list.
+        async function runBulk(targets, call, verbPast, verbFail, { removes = false } = {}) {
+            const results = await Promise.allSettled(
+                targets.map(t => call(t.id).then(() => t.id))
+            );
+            let ok = 0, failed = 0;
+            const failures = [];
+            for (let i = 0; i < results.length; i++) {
+                const r = results[i];
+                if (r.status === 'fulfilled') {
+                    ok++;
+                    if (removes) removeTorrentLocally(r.value);
+                } else {
+                    failed++;
+                    failures.push((targets[i].custom_name || targets[i].name) + ': ' + (r.reason && r.reason.message || 'failed'));
+                }
+            }
+            if (failed === 0) {
+                toast(`${verbPast} ${ok} torrent${ok === 1 ? '' : 's'}`, 'success');
+            } else if (ok === 0) {
+                toast(`${verbFail} failed for all ${failed}: ${failures[0]}`, 'error');
+            } else {
+                toast(`${verbPast} ${ok}, ${failed} failed`, 'warn');
+                console.warn('Bulk action failures:', failures);
+            }
+            updateBulkBar();
+        }
+
+        async function doStart(id, t) {
+            try {
+                await postJson(`/api/torrent/${id}/start`);
+                toast(`Started: ${t.name}`, 'success');
+            } catch (err) {
+                toast(`Start failed: ${err.message}`, 'error');
+            }
+        }
+
+        async function doStop(id, t) {
+            try {
+                await postJson(`/api/torrent/${id}/stop`);
+                toast(`Stopped: ${t.name}`, 'success');
+            } catch (err) {
+                toast(`Stop failed: ${err.message}`, 'error');
+            }
+        }
+
+        async function doVerify(id, t) {
+            try {
+                await postJson(`/api/torrent/${id}/verify`);
+                toast(`Verifying: ${t.name}`, 'success');
+            } catch (err) {
+                toast(`Verify failed: ${err.message}`, 'error');
+            }
+        }
+
+        async function doUnload(id, t) {
+            try {
+                await postJson(`/api/torrent/${id}/unload`);
+                removeTorrentLocally(id);
+                loadUnloaded();
+                toast(`Unloaded: ${t.name}`, 'success');
+            } catch (err) {
+                toast(`Unload failed: ${err.message}`, 'error');
+            }
+        }
+
+        // ----- unloaded torrents panel -----
+        //
+        // Torrents parked outside Transmission entirely (magnet + download
+        // dir live in the dashboard DB). They cost the daemon nothing, so
+        // this list is fetched on load and after mutations rather than on
+        // the 5s poll.
+
+        const unloadedBar = document.getElementById('unloaded-bar');
+        const unloadedListEl = document.getElementById('unloaded-list');
+        const unloadedCountEl = document.getElementById('unloaded-count');
+        const unloadedToggle = document.getElementById('unloaded-toggle');
+        let unloadedItems = [];
+        let unloadedOpen = localStorage.getItem('unloadedOpen') === '1';
+
+        function syncUnloadedOpen() {
+            unloadedListEl.hidden = !unloadedOpen;
+            unloadedToggle.setAttribute('aria-expanded', unloadedOpen ? 'true' : 'false');
+            unloadedBar.classList.toggle('unloaded-bar--open', unloadedOpen);
+        }
+
+        unloadedToggle.addEventListener('click', () => {
+            unloadedOpen = !unloadedOpen;
+            localStorage.setItem('unloadedOpen', unloadedOpen ? '1' : '0');
+            syncUnloadedOpen();
+        });
+
+        let unloadedBusy = false;
+        async function loadUnloaded() {
+            if (unloadedBusy) return;
+            unloadedBusy = true;
+            try {
+                const res = await fetch('/api/unloaded');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                unloadedItems = (data && data.unloaded) || [];
+                renderUnloaded();
+            } catch (err) {
+                console.error('Unloaded fetch failed:', err);
+            } finally {
+                unloadedBusy = false;
+            }
+        }
+
+        function unloadedName(it) {
+            return it.custom_name || it.name || ('torrent ' + it.id);
+        }
+
+        function renderUnloaded() {
+            unloadedCountEl.textContent = unloadedItems.length;
+            unloadedBar.hidden = unloadedItems.length === 0;
+            unloadedListEl.textContent = '';
+            for (const it of unloadedItems) {
+                const row = document.createElement('div');
+                row.className = 'unloaded-row';
+
+                const info = document.createElement('div');
+                info.className = 'unloaded-info';
+                const name = document.createElement('div');
+                name.className = 'unloaded-name';
+                name.textContent = unloadedName(it);
+                name.title = it.name || '';
+                // Reuse the card meta-row classes so labels/values pick up
+                // the same sans/mono pairing as the torrent cards.
+                const meta = document.createElement('div');
+                meta.className = 'card-meta unloaded-meta';
+                const metaItem = (label, value) => {
+                    const item = document.createElement('span');
+                    item.className = 'meta-item';
+                    const l = document.createElement('span');
+                    l.className = 'meta-label';
+                    l.textContent = label;
+                    const v = document.createElement('span');
+                    v.className = 'meta-value';
+                    v.textContent = value;
+                    item.appendChild(l);
+                    item.appendChild(v);
+                    return item;
+                };
+                if (it.total_size) meta.appendChild(metaItem('size', formatSize(it.total_size)));
+                if (it.percent_done != null) meta.appendChild(metaItem('done', Math.round(it.percent_done * 100) + '%'));
+                meta.appendChild(metaItem('unloaded', formatTimestamp(it.unloaded_at)));
+                info.appendChild(name);
+                info.appendChild(meta);
+
+                const actions = document.createElement('div');
+                actions.className = 'unloaded-actions';
+                const startBtn = document.createElement('button');
+                startBtn.type = 'button';
+                startBtn.className = 'btn btn-primary btn-sm';
+                startBtn.textContent = 'Start';
+                startBtn.addEventListener('click', () => startUnloaded(it, startBtn));
+                const forgetBtn = document.createElement('button');
+                forgetBtn.type = 'button';
+                forgetBtn.className = 'btn btn-sm';
+                forgetBtn.textContent = 'Forget';
+                forgetBtn.addEventListener('click', () => forgetUnloaded(it));
+                actions.appendChild(startBtn);
+                actions.appendChild(forgetBtn);
+
+                row.appendChild(info);
+                row.appendChild(actions);
+                unloadedListEl.appendChild(row);
+            }
+        }
+
+        async function startUnloaded(it, btn) {
+            btn.disabled = true;
+            btn.textContent = 'Adding…';
+            try {
+                await postJson(`/api/unloaded/${it.id}/start`);
+                toast(`Started: ${unloadedName(it)}`, 'success');
+                loadUnloaded();
+                poll();
+            } catch (err) {
+                btn.disabled = false;
+                btn.textContent = 'Start';
+                toast(`Start failed: ${err.message}`, 'error');
+            }
+        }
+
+        function forgetUnloaded(it) {
+            openConfirm({
+                title: 'Forget unloaded torrent',
+                body: 'Delete the saved magnet link? Local files stay on disk, but you would need the magnet or .torrent file again to re-add it. This cannot be undone.',
+                target: unloadedName(it),
+                danger: true,
+                confirmLabel: 'Forget',
+                onConfirm: async () => {
+                    try {
+                        await postJson(`/api/unloaded/${it.id}/forget`);
+                        toast(`Forgot: ${unloadedName(it)}`, 'success');
+                        loadUnloaded();
+                    } catch (err) {
+                        toast(`Forget failed: ${err.message}`, 'error');
+                    }
+                },
+            });
+        }
+
+        async function doRemove(id, t, deleteFiles) {
+            const endpoint = deleteFiles ? 'delete' : 'remove';
+            try {
+                await postJson(`/api/torrent/${id}/${endpoint}`);
+                removeTorrentLocally(id);
+                toast(deleteFiles
+                    ? `Removed and deleted: ${t.name}`
+                    : `Removed: ${t.name}`, 'success');
+            } catch (err) {
+                toast(`Remove failed: ${err.message}`, 'error');
+            }
+        }
+
+        // ----- confirm modal -----
+
+        let confirmHandler = null;
+
+        function openConfirm({ title, body, target, danger, confirmLabel, onConfirm }) {
+            document.getElementById('confirm-title').textContent = title;
+            document.getElementById('confirm-body').textContent = body;
+            document.getElementById('confirm-target').textContent = target || '';
+            const ok = document.getElementById('confirm-ok');
+            ok.textContent = confirmLabel || 'Confirm';
+            ok.classList.toggle('btn-danger', !!danger);
+            ok.classList.toggle('btn-primary', !danger);
+            confirmHandler = onConfirm;
+            openModal('modal-confirm');
+        }
+
+        document.getElementById('confirm-ok').addEventListener('click', () => {
+            const fn = confirmHandler;
+            confirmHandler = null;
+            closeModal('modal-confirm');
+            if (fn) fn();
+        });
+
+        // ----- labels modal -----
+
+        let labelsState = [];
+        let labelsTorrentId = null;
+
+        function openLabelsModal(t) {
+            labelsTorrentId = t.id;
+            labelsState = Array.isArray(t.labels) ? [...t.labels] : [];
+            document.getElementById('labels-name').textContent = t.name;
+            document.getElementById('labels-input').value = '';
+            renderChips();
+            openModal('modal-labels');
+            setTimeout(() => document.getElementById('labels-input').focus(), 0);
+        }
+
+        function renderChips() {
+            const container = document.getElementById('labels-chip-input');
+            const input = document.getElementById('labels-input');
+            container.querySelectorAll('.chip').forEach(c => c.remove());
+            labelsState.forEach(l => {
+                const chip = document.createElement('span');
+                chip.className = 'chip';
+                chip.dataset.label = l;
+                const text = document.createElement('span');
+                text.className = 'chip-text';
+                text.textContent = l;
+                const x = document.createElement('button');
+                x.type = 'button';
+                x.className = 'chip-x';
+                x.textContent = '×';
+                x.setAttribute('aria-label', 'Remove label');
+                chip.appendChild(text);
+                chip.appendChild(x);
+                container.insertBefore(chip, input);
+            });
+        }
+
+        document.getElementById('labels-chip-input').addEventListener('click', e => {
+            if (e.target.classList.contains('chip-x')) {
+                const chip = e.target.closest('.chip');
+                labelsState = labelsState.filter(l => l !== chip.dataset.label);
+                renderChips();
+                document.getElementById('labels-input').focus();
+            } else if (e.target.id === 'labels-chip-input' || e.currentTarget === e.target) {
+                document.getElementById('labels-input').focus();
+            }
+        });
+
+        document.getElementById('labels-input').addEventListener('keydown', e => {
+            const input = e.currentTarget;
+            if (e.key === 'Enter' || e.key === ',') {
+                e.preventDefault();
+                const val = input.value.trim().replace(/,/g, '').trim();
+                if (val && !labelsState.includes(val)) {
+                    labelsState.push(val);
+                    renderChips();
+                }
+                input.value = '';
+            } else if (e.key === 'Backspace' && input.value === '' && labelsState.length > 0) {
+                labelsState.pop();
+                renderChips();
+            }
+        });
+
+        document.getElementById('labels-save').addEventListener('click', async () => {
+            const input = document.getElementById('labels-input');
+            const pending = input.value.trim().replace(/,/g, '').trim();
+            if (pending && !labelsState.includes(pending)) {
+                labelsState.push(pending);
+            }
+            input.value = '';
+            const id = labelsTorrentId;
+            const labels = [...labelsState];
+            try {
+                await postJson(`/api/torrent/${id}/label`, { labels });
+                const t = findTorrent(id);
+                if (t) {
+                    t.labels = labels;
+                    const card = cardsById.get(id);
+                    if (card) renderLabels(card, labels);
+                }
+                closeModal('modal-labels');
+                toast('Labels updated', 'success');
+            } catch (err) {
+                toast(`Save failed: ${err.message}`, 'error');
+            }
+        });
+
+        // ----- rename modal -----
+
+        let renameTorrentId = null;
+
+        function openRenameModal(t) {
+            renameTorrentId = t.id;
+            const input = document.getElementById('rename-input');
+            input.value = t.custom_name || '';
+            document.getElementById('rename-default-name').textContent = t.name;
+            const clearBtn = document.getElementById('rename-clear');
+            clearBtn.hidden = !t.custom_name;
+            document.getElementById('rename-error').hidden = true;
+            openModal('modal-rename');
+            setTimeout(() => { input.focus(); input.select(); }, 0);
+        }
+
+        async function submitRename(value) {
+            if (renameTorrentId == null) return;
+            const id = renameTorrentId;
+            const errEl = document.getElementById('rename-error');
+            errEl.hidden = true;
+            const body = { custom_name: value || '' };
+            try {
+                const data = await postJson(`/api/torrent/${id}/name`, body);
+                const t = findTorrent(id);
+                if (t) {
+                    if (data && data.custom_name) {
+                        t.custom_name = data.custom_name;
+                        t.default_name = t.default_name || t.name;
+                    } else {
+                        delete t.custom_name;
+                        delete t.default_name;
+                    }
+                    const card = cardsById.get(id);
+                    if (card) updateCard(card, t);
+                }
+                // Refresh the expanded detail cache so the meta block reflects
+                // the change without waiting for the next detail poll.
+                const d = detailById.get(id);
+                if (d) {
+                    if (data && data.custom_name) {
+                        d.custom_name = data.custom_name;
+                        d.default_name = d.default_name || d.name;
+                    } else {
+                        delete d.custom_name;
+                        delete d.default_name;
+                    }
+                    const card = cardsById.get(id);
+                    if (card && expandedIds.has(id)) renderExpanded(card, id);
+                }
+                closeModal('modal-rename');
+                toast(value ? 'Renamed' : 'Custom name cleared', 'success');
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.hidden = false;
+            }
+        }
+
+        document.getElementById('rename-save').addEventListener('click', () => {
+            const value = document.getElementById('rename-input').value.trim();
+            submitRename(value);
+        });
+
+        document.getElementById('rename-clear').addEventListener('click', () => {
+            submitRename('');
+        });
+
+        document.getElementById('rename-input').addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitRename(e.currentTarget.value.trim());
+            }
+        });
+
+        // ----- add torrent modal -----
+
+        document.getElementById('add-btn').addEventListener('click', () => {
+            switchAddTab('magnet');
+            document.getElementById('add-magnet-input').value = '';
+            document.getElementById('add-file-input').value = '';
+            document.getElementById('add-magnet-error').hidden = true;
+            document.getElementById('add-file-error').hidden = true;
+            openModal('modal-add');
+        });
+
+        function switchAddTab(name) {
+            document.querySelectorAll('.add-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.addTab === name);
+            });
+            document.querySelectorAll('.add-pane').forEach(p => {
+                p.hidden = p.dataset.addPane !== name;
+            });
+        }
+
+        document.querySelectorAll('.add-tab').forEach(tab => {
+            tab.addEventListener('click', () => switchAddTab(tab.dataset.addTab));
+        });
+
+        function showFormError(id, msg) {
+            const el = document.getElementById(id);
+            el.textContent = msg;
+            el.hidden = false;
+        }
+
+        document.getElementById('add-submit').addEventListener('click', async () => {
+            const active = document.querySelector('.add-tab.active').dataset.addTab;
+            if (active === 'magnet') {
+                document.getElementById('add-magnet-error').hidden = true;
+                const magnet = document.getElementById('add-magnet-input').value.trim();
+                if (!magnet) {
+                    showFormError('add-magnet-error', 'Please enter a magnet link.');
+                    return;
+                }
+                try {
+                    await postJson('/api/torrent/add/magnet', { magnet });
+                    closeModal('modal-add');
+                    toast('Torrent added', 'success');
+                } catch (err) {
+                    showFormError('add-magnet-error', err.message);
+                }
+            } else {
+                document.getElementById('add-file-error').hidden = true;
+                const input = document.getElementById('add-file-input');
+                const file = input.files && input.files[0];
+                if (!file) {
+                    showFormError('add-file-error', 'Please choose a .torrent file.');
+                    return;
+                }
+                try {
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    const res = await fetch('/api/torrent/add/file', { method: 'POST', body: fd });
+                    if (res.status === 401) { unauthorizedRedirect(); return; }
+                    let data = null;
+                    try { data = await res.json(); } catch (_) {}
+                    if (!res.ok || (data && data.ok === false)) {
+                        throw new Error((data && data.error) || ('HTTP ' + res.status));
+                    }
+                    closeModal('modal-add');
+                    toast('Torrent added', 'success');
+                } catch (err) {
+                    showFormError('add-file-error', err.message);
+                }
+            }
+        });
+
+        // ----- copy to media server -----
+
+        // Parse a torrent name to guess media type / title / year / season.
+        // Designed for scene-style names (Show.Name.S04E12.1080p..., Movie.Name.2024.BluRay...).
+        // All fields are guesses — the modal leaves them editable.
+        function parseTorrentMeta(rawName) {
+            const empty = { type: 'movie', title: '', year: '', season: '' };
+            if (!rawName) return empty;
+            const name = String(rawName);
+
+            // Season/episode patterns, tried in order of confidence.
+            const showPatterns = [
+                /\bS(\d{1,2})\s*[._-]?\s*E\d{1,3}\b/i,           // S04E12, S04.E12
+                /\b(\d{1,2})x\d{1,3}\b/,                          // 4x12
+                /\bSeason[\s._-]*(\d{1,2})\b/i,                   // Season 4, Season.04
+                /\bS(\d{1,2})\b(?![A-Za-z])/i,                    // S04 alone (last resort)
+            ];
+
+            let type = 'movie';
+            let season = '';
+            let titlePart = name;
+            for (const re of showPatterns) {
+                const m = name.match(re);
+                if (m) {
+                    type = 'show';
+                    season = String(parseInt(m[1], 10));
+                    titlePart = name.slice(0, m.index);
+                    break;
+                }
+            }
+
+            // Year: 1900–(thisYear+2). Prefer the first one inside the title chunk,
+            // since trailing years usually belong to release metadata.
+            const currentYear = new Date().getFullYear();
+            const yearRe = /\b(19\d{2}|20\d{2})\b/g;
+            let year = '';
+            let m;
+            let fallbackYear = '';
+            while ((m = yearRe.exec(name)) !== null) {
+                const y = parseInt(m[1], 10);
+                if (y < 1900 || y > currentYear + 2) continue;
+                if (m.index < titlePart.length) {
+                    year = String(y);
+                    titlePart = name.slice(0, m.index);
+                    break;
+                }
+                if (!fallbackYear) fallbackYear = String(y);
+            }
+            if (!year && fallbackYear) year = fallbackYear;
+
+            // Clean title: strip bracketed groups, normalize separators, trim release tags.
+            const releaseTag = /\b(?:720p|1080p|2160p|480p|4k|uhd|hdtv|web[- ]?dl|webrip|web|bluray|bdrip|brrip|dvdrip|hdrip|x264|x265|hevc|h\.?264|h\.?265|xvid|aac|ac3|dts|ddp?5\.?1|atmos|truehd|repack|proper|extended|uncut|director'?s?\.?cut|remux|hdr|sdr|imax|complete|multi|dual|dubbed|subbed|internal)\b.*$/i;
+            let title = titlePart
+                .replace(/\[[^\]]*\]/g, ' ')      // [TGx], [rartv]
+                .replace(/\([^)]*\)/g, ' ')       // (group)
+                .replace(/[._]+/g, ' ')
+                .replace(releaseTag, ' ')
+                .replace(/[\[\]()]+/g, ' ')       // any stray unmatched brackets
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/^[-–—\s]+|[-–—\s]+$/g, '')
+                .trim();
+
+            return { type, title, year, season };
+        }
+
+        let copyTorrentId = null;
+        let copyPollHandle = null;
+        let mediaConfigCache = null;
+        // Seasons detected in the current torrent. null until detection runs;
+        // an empty array means detection ran and found 0 seasons (single-season
+        // UI stays, multi-season checklist is hidden).
+        let copyDetectedSeasons = null;
+        let copyDetectedUnclassifiedCount = 0;
+
+        const copyNameEl = document.getElementById('copy-name');
+        const copyFolderEl = document.getElementById('copy-folder');
+        const copyMediaTypeEl = document.getElementById('copy-media-type');
+        const copyMovieFieldsEl = document.getElementById('copy-movie-fields');
+        const copyShowFieldsEl = document.getElementById('copy-show-fields');
+        const copySubfolderEl = document.getElementById('copy-subfolder');
+        const copyRenameEl = document.getElementById('copy-rename');
+        const copyShowNameEl = document.getElementById('copy-show-name');
+        const copyShowYearEl = document.getElementById('copy-show-year');
+        const copyShowSeasonEl = document.getElementById('copy-show-season');
+        const copyShowSeasonSingleWrap = document.getElementById('copy-show-season-single-wrap');
+        const copyShowSingleHint = document.getElementById('copy-show-single-hint');
+        const copyShowDetectStatus = document.getElementById('copy-show-detect-status');
+        const copyShowMultiWrap = document.getElementById('copy-show-multi-wrap');
+        const copyShowSeasonsList = document.getElementById('copy-show-seasons-list');
+        const copyShowUnclassifiedEl = document.getElementById('copy-show-unclassified');
+        const copyDeleteEl = document.getElementById('copy-delete-after');
+        const copyErrorEl = document.getElementById('copy-error');
+        const copyDestPreviewEl = document.getElementById('copy-dest-preview');
+        const copyDrivesEl = document.getElementById('copy-drives');
+        const copyProgressWrap = document.getElementById('copy-progress-wrap');
+        const copyProgressFill = document.getElementById('copy-progress-fill');
+        const copyProgressPct = document.getElementById('copy-progress-pct');
+        const copyProgressBytes = document.getElementById('copy-progress-bytes');
+        const copyProgressRate = document.getElementById('copy-progress-rate');
+        const copyProgressEta = document.getElementById('copy-progress-eta');
+        const copyProgressStatus = document.getElementById('copy-progress-status');
+        const copyTailscaleAuthEl = document.getElementById('copy-tailscale-auth');
+        const copyTailscaleAuthLink = document.getElementById('copy-tailscale-auth-link');
+        const copyStartBtn = document.getElementById('copy-start-btn');
+        const copyStopBtn = document.getElementById('copy-stop-btn');
+        const copyCancelBtn = document.getElementById('copy-cancel-btn');
+
+        function showCopyError(msg) {
+            copyErrorEl.textContent = msg;
+            copyErrorEl.hidden = false;
+        }
+        function clearCopyError() {
+            copyErrorEl.hidden = true;
+            copyErrorEl.textContent = '';
+        }
+        function showCopyTailscaleAuth(url) {
+            if (!url || !/^https:\/\/login\.tailscale\.com\//.test(url)) {
+                copyTailscaleAuthEl.hidden = true;
+                return;
+            }
+            copyTailscaleAuthLink.href = url;
+            copyTailscaleAuthLink.textContent = url;
+            copyTailscaleAuthEl.hidden = false;
+        }
+        function clearCopyTailscaleAuth() {
+            copyTailscaleAuthEl.hidden = true;
+        }
+
+        function setCopyDestPreview() {
+            const cfg = mediaConfigCache;
+            const folders = (cfg && cfg.folders) || [];
+            const selected = folders.find(f => f.name === copyFolderEl.value);
+            if (!cfg || !cfg.host || !selected) {
+                copyDestPreviewEl.hidden = true;
+                return;
+            }
+            const root = (selected.path || '').replace(/\/+$/, '');
+            const parts = [root];
+            if (copyMediaTypeEl.value === 'show') {
+                const name = copyShowNameEl.value.replace(/["'`]/g, '').trim();
+                const year = copyShowYearEl.value.trim();
+                if (!name || !year) {
+                    copyDestPreviewEl.hidden = true;
+                    return;
+                }
+                if (copyIsMultiSeasonMode()) {
+                    const selected = getSelectedDetectedSeasons();
+                    if (selected.length === 0) {
+                        copyDestPreviewEl.hidden = true;
+                        return;
+                    }
+                    parts.push(`${name} (${year})`);
+                    copyDestPreviewEl.textContent =
+                        `Will copy ${selected.length} season${selected.length === 1 ? '' : 's'} `
+                        + `(${selected.map(s => 'S' + s).join(', ')}) under `
+                        + `${cfg.user}@${cfg.host}:${parts.join('/')}/`;
+                    copyDestPreviewEl.hidden = false;
+                    return;
+                }
+                const seasonRaw = copyShowSeasonEl.value.trim();
+                if (seasonRaw === '') {
+                    copyDestPreviewEl.hidden = true;
+                    return;
+                }
+                const season = String(parseInt(seasonRaw, 10) || 0).padStart(2, '0');
+                parts.push(`${name} (${year})`);
+                parts.push(`Season ${season}`);
+                copyDestPreviewEl.textContent =
+                    `Episodes will land in ${cfg.user}@${cfg.host}:${parts.join('/')}/`;
+            } else {
+                const sub = copySubfolderEl.value.trim().replace(/^\/+|\/+$/g, '');
+                const rename = copyRenameEl.value.trim();
+                if (sub) parts.push(sub);
+                if (rename) parts.push(rename);
+                copyDestPreviewEl.textContent =
+                    `Will copy to ${cfg.user}@${cfg.host}:${parts.join('/')}`;
+            }
+            copyDestPreviewEl.hidden = false;
+        }
+
+        // ----- drive indicator -----
+        // Async dry-run of the copy's disk selection: which drive in the
+        // fallback group gets the media, per-disk free space, full/unreachable
+        // flags. Sequence token drops stale responses when the user flips
+        // folder or media type while a request is in flight.
+        let copyDrivesSeq = 0;
+
+        function copyDriveRow(label, detail, badgeText, badgeClass) {
+            const row = document.createElement('div');
+            row.className = 'copy-drive-row';
+            const path = document.createElement('span');
+            path.className = 'copy-drive-path';
+            path.textContent = label;
+            row.appendChild(path);
+            if (detail) {
+                const meta = document.createElement('span');
+                meta.className = 'copy-drive-meta';
+                meta.textContent = detail;
+                row.appendChild(meta);
+            }
+            if (badgeText) {
+                const badge = document.createElement('span');
+                badge.className = `copy-drive-badge ${badgeClass || ''}`;
+                badge.textContent = badgeText;
+                row.appendChild(badge);
+            }
+            return row;
+        }
+
+        async function refreshCopyDrives() {
+            const seq = ++copyDrivesSeq;
+            const tid = copyTorrentId;
+            const folder = copyFolderEl.value;
+            if (tid == null || !folder) {
+                copyDrivesEl.hidden = true;
+                return;
+            }
+            copyDrivesEl.innerHTML = '';
+            copyDrivesEl.appendChild(
+                copyDriveRow('Checking drive space…', '', '', ''));
+            copyDrivesEl.hidden = false;
+            let data = null;
+            try {
+                const params = new URLSearchParams({
+                    folder,
+                    media_type: copyMediaTypeEl.value,
+                });
+                const res = await fetch(
+                    `/api/torrent/${tid}/copy/preflight?${params}`);
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (res.ok) data = await res.json();
+            } catch (_) {}
+            // A newer request, torrent switch, or modal close supersedes us.
+            if (seq !== copyDrivesSeq || copyTorrentId !== tid) return;
+            if (!data || !data.ok || !Array.isArray(data.disks) || data.disks.length === 0) {
+                copyDrivesEl.hidden = true;
+                return;
+            }
+
+            copyDrivesEl.innerHTML = '';
+            data.disks.forEach(d => {
+                let badgeText = '';
+                let badgeClass = '';
+                if (d.error) {
+                    badgeText = 'unreachable';
+                    badgeClass = 'copy-drive-badge-warn';
+                } else if (d.path === data.chosen_path) {
+                    badgeText = '→ copies here';
+                    badgeClass = 'copy-drive-badge-ok';
+                } else if (d.fits === false) {
+                    badgeText = 'full';
+                    badgeClass = 'copy-drive-badge-err';
+                }
+                const detail = d.free != null
+                    ? `${formatSize(d.free)} free of ${formatSize(d.total)}`
+                    : '';
+                copyDrivesEl.appendChild(
+                    copyDriveRow(d.path, detail, badgeText, badgeClass));
+            });
+            if (data.need > 0) {
+                const note = document.createElement('div');
+                note.className = 'copy-drive-note';
+                note.textContent = data.chosen_path
+                    ? `~${formatSize(data.need)} to copy (drives keep `
+                      + `${Math.round((data.margin_fraction || 0) * 100)}% headroom)`
+                    : `Not enough space on any drive for ~${formatSize(data.need)}.`;
+                if (!data.chosen_path) note.classList.add('copy-drive-note-err');
+                copyDrivesEl.appendChild(note);
+            }
+            copyDrivesEl.hidden = false;
+        }
+
+        function applyCopyMediaTypeUI() {
+            const isShow = copyMediaTypeEl.value === 'show';
+            copyShowFieldsEl.hidden = !isShow;
+            copyMovieFieldsEl.hidden = isShow;
+            if (!isShow) {
+                resetCopyMultiSeasonUI();
+            }
+        }
+
+        function copyIsMultiSeasonMode() {
+            return copyMediaTypeEl.value === 'show'
+                && Array.isArray(copyDetectedSeasons)
+                && copyDetectedSeasons.length >= 2;
+        }
+
+        function getSelectedDetectedSeasons() {
+            if (!Array.isArray(copyDetectedSeasons)) return [];
+            const checked = Array.from(
+                copyShowSeasonsList.querySelectorAll('input[type="checkbox"]:checked')
+            ).map(el => el.value);
+            // Preserve the detection order (zero-padded numeric sort already applied
+            // server-side, so the rendered order matches season number).
+            const checkedSet = new Set(checked);
+            return copyDetectedSeasons
+                .map(s => s.season)
+                .filter(s => checkedSet.has(s));
+        }
+
+        function resetCopyMultiSeasonUI() {
+            copyDetectedSeasons = null;
+            copyDetectedUnclassifiedCount = 0;
+            copyShowSeasonsList.innerHTML = '';
+            copyShowMultiWrap.hidden = true;
+            copyShowSeasonSingleWrap.hidden = false;
+            copyShowSingleHint.hidden = false;
+            copyShowUnclassifiedEl.hidden = true;
+            copyShowDetectStatus.hidden = true;
+            copyShowSeasonEl.required = false;
+        }
+
+        function setCopySeasonsListDisabled(disabled) {
+            copyShowSeasonsList.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.disabled = disabled;
+            });
+        }
+
+        function applyDetectedSeasons(detection) {
+            copyShowDetectStatus.hidden = true;
+            const seasons = (detection && detection.seasons) || [];
+            const unclassified = (detection && detection.unclassified) || [];
+            copyDetectedSeasons = seasons;
+            copyDetectedUnclassifiedCount = unclassified.length;
+
+            if (seasons.length < 2) {
+                // 0 or 1 detected season — stick with the single-season UI. If
+                // exactly one was detected, pre-fill the season number for
+                // convenience but let the user override it.
+                copyShowMultiWrap.hidden = true;
+                copyShowSeasonSingleWrap.hidden = false;
+                copyShowSingleHint.hidden = false;
+                if (seasons.length === 1 && copyShowSeasonEl.value.trim() === '') {
+                    copyShowSeasonEl.value = String(parseInt(seasons[0].season, 10));
+                }
+                setCopyDestPreview();
+                return;
+            }
+
+            // Multi-season: build a checklist, hide the single-season input.
+            copyShowSeasonSingleWrap.hidden = true;
+            copyShowSingleHint.hidden = true;
+            copyShowMultiWrap.hidden = false;
+            copyShowSeasonsList.innerHTML = '';
+            seasons.forEach(s => {
+                const row = document.createElement('label');
+                row.className = 'copy-season-row';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.value = s.season;
+                cb.checked = true;
+                cb.addEventListener('change', () => {
+                    clearCopyError();
+                    setCopyDestPreview();
+                });
+                const text = document.createElement('span');
+                text.textContent = `Season ${s.season} — ${s.file_count} file${s.file_count === 1 ? '' : 's'}`
+                    + (s.total_bytes > 0 ? ` (${formatSize(s.total_bytes)})` : '');
+                row.appendChild(cb);
+                row.appendChild(text);
+                copyShowSeasonsList.appendChild(row);
+            });
+
+            if (unclassified.length > 0) {
+                copyShowUnclassifiedEl.hidden = false;
+                copyShowUnclassifiedEl.textContent =
+                    `${unclassified.length} video file${unclassified.length === 1 ? '' : 's'} `
+                    + `could not be matched to a season and will be skipped.`;
+            } else {
+                copyShowUnclassifiedEl.hidden = true;
+            }
+
+            setCopyDestPreview();
+        }
+
+        async function detectSeasonsForTorrent(tid) {
+            resetCopyMultiSeasonUI();
+            copyShowDetectStatus.hidden = false;
+            try {
+                const res = await fetch(`/api/torrent/${tid}/seasons`);
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) {
+                    copyShowDetectStatus.hidden = true;
+                    return;
+                }
+                const data = await res.json();
+                // If the user switched media type or torrent while we were
+                // in flight, drop the result.
+                if (copyTorrentId !== tid || copyMediaTypeEl.value !== 'show') {
+                    return;
+                }
+                if (!data.is_dir) {
+                    copyShowDetectStatus.hidden = true;
+                    return;
+                }
+                applyDetectedSeasons(data);
+            } catch (_) {
+                copyShowDetectStatus.hidden = true;
+            }
+        }
+
+        function populateFolderSelect(folders) {
+            copyFolderEl.innerHTML = '';
+            // Empty by default so the user must consciously pick a library —
+            // avoids shows silently landing in Movies when the field is skipped.
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = 'Select a folder…';
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            copyFolderEl.appendChild(placeholder);
+            // Same-name folders form a fallback group — show one option per
+            // unique name, tagging duplicates so the user knows a copy will
+            // spill over to another disk if the primary is full.
+            const groups = new Map();
+            (folders || []).forEach(f => {
+                if (!groups.has(f.name)) groups.set(f.name, []);
+                groups.get(f.name).push(f);
+            });
+            groups.forEach((list, name) => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                if (list.length === 1) {
+                    opt.textContent = `${name} — ${list[0].path}`;
+                } else {
+                    const extra = list.length - 1;
+                    opt.textContent = `${name} — ${list[0].path} (+${extra} fallback${extra > 1 ? 's' : ''})`;
+                }
+                copyFolderEl.appendChild(opt);
+            });
+        }
+
+        function formatBytesShort(n) {
+            if (!n || n <= 0) return '0 B';
+            return formatSize(n);
+        }
+
+        async function fetchMediaConfig() {
+            try {
+                const res = await fetch('/api/media/config');
+                if (res.status === 401) { unauthorizedRedirect(); return null; }
+                const data = await res.json();
+                return (data && data.config) || {};
+            } catch (_) {
+                return null;
+            }
+        }
+
+        async function openCopyModal(t) {
+            copyTorrentId = t.id;
+            copyNameEl.textContent = t.name;
+            resetCopyMultiSeasonUI();
+
+            const guess = parseTorrentMeta(t.name);
+            copyMediaTypeEl.value = guess.type;
+            applyCopyMediaTypeUI();
+            if (guess.type === 'show') {
+                copyShowNameEl.value = guess.title;
+                copyShowYearEl.value = guess.year;
+                copyShowSeasonEl.value = guess.season;
+                copySubfolderEl.value = '';
+                copyRenameEl.value = '';
+            } else {
+                const movieFolder = guess.title && guess.year
+                    ? `${guess.title} (${guess.year})/`
+                    : (guess.title ? `${guess.title}/` : '');
+                copySubfolderEl.value = movieFolder;
+                copyRenameEl.value = '';
+                copyShowNameEl.value = guess.title;
+                copyShowYearEl.value = guess.year;
+                copyShowSeasonEl.value = '';
+            }
+            copyDeleteEl.checked = false;
+            clearCopyError();
+            clearCopyTailscaleAuth();
+            copyProgressWrap.hidden = true;
+            copyStartBtn.hidden = false;
+            copyStopBtn.hidden = true;
+            copyCancelBtn.textContent = 'Cancel';
+            copyMediaTypeEl.disabled = false;
+            copySubfolderEl.disabled = false;
+            copyRenameEl.disabled = false;
+            copyShowNameEl.disabled = false;
+            copyShowYearEl.disabled = false;
+            copyShowSeasonEl.disabled = false;
+            setCopySeasonsListDisabled(false);
+            copyDeleteEl.disabled = false;
+
+            mediaConfigCache = await fetchMediaConfig();
+            const folders = (mediaConfigCache && mediaConfigCache.folders) || [];
+            populateFolderSelect(folders);
+            if (!mediaConfigCache || !mediaConfigCache.host) {
+                showCopyError('Media destination is not configured. Open Settings to set host and folders.');
+                copyStartBtn.disabled = true;
+            } else if (folders.length === 0) {
+                showCopyError('No destination folders configured. Add at least one on the Settings page.');
+                copyStartBtn.disabled = true;
+            } else {
+                copyStartBtn.disabled = false;
+            }
+            setCopyDestPreview();
+            refreshCopyDrives();
+
+            // Kick off background season detection so the modal switches
+            // to the multi-season checklist when warranted. Fire-and-forget;
+            // applyDetectedSeasons updates the UI when the response lands.
+            if (copyMediaTypeEl.value === 'show') {
+                detectSeasonsForTorrent(t.id);
+            }
+
+            // If a copy is already running or completed for this torrent,
+            // jump straight into the progress view so the user can monitor
+            // or cancel without reissuing the request.
+            try {
+                const res = await fetch(`/api/torrent/${t.id}/copy/status`);
+                if (res.ok) {
+                    const entry = await res.json();
+                    if (entry && (entry.status === 'copying' || entry.status === 'done' ||
+                                  entry.status === 'error' || entry.status === 'cancelled')) {
+                        applyCopyStatus(entry);
+                        if (entry.status === 'copying') startCopyPoll();
+                    }
+                }
+            } catch (_) {}
+
+            openModal('modal-copy');
+            setTimeout(() => {
+                const focusEl = copyMediaTypeEl.value === 'show'
+                    ? (copyShowNameEl.value ? copyShowSeasonEl : copyShowNameEl)
+                    : copySubfolderEl;
+                focusEl.focus();
+                if (focusEl.select) focusEl.select();
+            }, 0);
+        }
+
+        function applyCopyStatus(entry) {
+            copyProgressWrap.hidden = false;
+            const pct = Math.max(0, Math.min(100, entry.progress_pct || 0));
+            copyProgressFill.style.width = pct + '%';
+            copyProgressPct.textContent = pct + '%';
+            const done = entry.bytes_transferred || 0;
+            const total = entry.total_bytes || 0;
+            copyProgressBytes.textContent = total > 0
+                ? `${formatBytesShort(done)} / ${formatBytesShort(total)}`
+                : formatBytesShort(done);
+            copyProgressRate.textContent = entry.rate ? `↑ ${entry.rate}` : '—';
+            copyProgressEta.textContent = (entry.eta_seconds !== null && entry.eta_seconds !== undefined)
+                ? `eta ${formatEta(entry.eta_seconds)}`
+                : '—';
+
+            if (entry.status === 'error' && entry.tailscale_auth_url) {
+                showCopyTailscaleAuth(entry.tailscale_auth_url);
+            } else {
+                clearCopyTailscaleAuth();
+            }
+
+            let statusText = '';
+            switch (entry.status) {
+                case 'copying':
+                    statusText = `Copying to ${entry.dest_host || ''}:${entry.dest_path || ''}…`;
+                    copyStartBtn.hidden = true;
+                    copyStopBtn.hidden = false;
+                    copyCancelBtn.textContent = 'Close';
+                    copyMediaTypeEl.disabled = true;
+                    copySubfolderEl.disabled = true;
+                    copyRenameEl.disabled = true;
+                    copyShowNameEl.disabled = true;
+                    copyShowYearEl.disabled = true;
+                    copyShowSeasonEl.disabled = true;
+                    setCopySeasonsListDisabled(true);
+                    copyDeleteEl.disabled = true;
+                    break;
+                case 'done':
+                    statusText = entry.deleted
+                        ? 'Copy complete. Torrent removed and local files deleted.'
+                        : 'Copy complete.';
+                    copyStartBtn.hidden = false;
+                    copyStartBtn.textContent = 'Copy again';
+                    copyStopBtn.hidden = true;
+                    copyCancelBtn.textContent = 'Close';
+                    copyMediaTypeEl.disabled = false;
+                    copySubfolderEl.disabled = false;
+                    copyRenameEl.disabled = false;
+                    copyShowNameEl.disabled = false;
+                    copyShowYearEl.disabled = false;
+                    copyShowSeasonEl.disabled = false;
+                    setCopySeasonsListDisabled(false);
+                    copyDeleteEl.disabled = false;
+                    break;
+                case 'error':
+                    statusText = `Copy failed: ${entry.error_message || 'unknown error'}`;
+                    copyStartBtn.hidden = false;
+                    copyStartBtn.textContent = 'Retry';
+                    copyStopBtn.hidden = true;
+                    copyCancelBtn.textContent = 'Close';
+                    copyMediaTypeEl.disabled = false;
+                    copySubfolderEl.disabled = false;
+                    copyRenameEl.disabled = false;
+                    copyShowNameEl.disabled = false;
+                    copyShowYearEl.disabled = false;
+                    copyShowSeasonEl.disabled = false;
+                    setCopySeasonsListDisabled(false);
+                    copyDeleteEl.disabled = false;
+                    break;
+                case 'cancelled':
+                    statusText = 'Copy cancelled.';
+                    copyStartBtn.hidden = false;
+                    copyStartBtn.textContent = 'Retry';
+                    copyStopBtn.hidden = true;
+                    copyCancelBtn.textContent = 'Close';
+                    copyMediaTypeEl.disabled = false;
+                    copySubfolderEl.disabled = false;
+                    copyRenameEl.disabled = false;
+                    copyShowNameEl.disabled = false;
+                    copyShowYearEl.disabled = false;
+                    copyShowSeasonEl.disabled = false;
+                    setCopySeasonsListDisabled(false);
+                    copyDeleteEl.disabled = false;
+                    break;
+            }
+            copyProgressStatus.textContent = statusText;
+        }
+
+        function startCopyPoll() {
+            stopCopyPoll();
+            copyPollHandle = setInterval(async () => {
+                if (copyTorrentId == null) { stopCopyPoll(); return; }
+                try {
+                    const res = await fetch(`/api/torrent/${copyTorrentId}/copy/status`);
+                    if (res.status === 401) { unauthorizedRedirect(); return; }
+                    if (!res.ok) return;
+                    const entry = await res.json();
+                    applyCopyStatus(entry);
+                    if (entry.status !== 'copying') stopCopyPoll();
+                } catch (_) {}
+            }, 1000);
+        }
+
+        function stopCopyPoll() {
+            if (copyPollHandle) {
+                clearInterval(copyPollHandle);
+                copyPollHandle = null;
+            }
+        }
+
+        copyStartBtn.addEventListener('click', async () => {
+            if (copyTorrentId == null) return;
+            clearCopyError();
+            clearCopyTailscaleAuth();
+            if (!copyFolderEl.value) {
+                showCopyError('Choose a destination folder.');
+                return;
+            }
+            const mediaType = copyMediaTypeEl.value;
+            const body = {
+                folder: copyFolderEl.value,
+                media_type: mediaType,
+                delete_after: copyDeleteEl.checked,
+            };
+            if (mediaType === 'show') {
+                const showName = copyShowNameEl.value.trim();
+                const year = copyShowYearEl.value.trim();
+                if (!showName) { showCopyError('Show name is required.'); return; }
+                if (!year) { showCopyError('Year is required.'); return; }
+                body.show_name = showName;
+                body.year = year;
+                if (copyIsMultiSeasonMode()) {
+                    const selected = getSelectedDetectedSeasons();
+                    if (selected.length === 0) {
+                        showCopyError('Pick at least one season to copy.');
+                        return;
+                    }
+                    body.seasons = selected;
+                } else {
+                    const season = copyShowSeasonEl.value.trim();
+                    if (season === '') { showCopyError('Season number is required.'); return; }
+                    body.season = season;
+                }
+            } else {
+                body.subfolder = copySubfolderEl.value.trim();
+                body.rename = copyRenameEl.value.trim();
+            }
+            copyStartBtn.disabled = true;
+            const prevLabel = copyStartBtn.textContent;
+            copyStartBtn.textContent = 'Starting…';
+            try {
+                await postJson(`/api/torrent/${copyTorrentId}/copy`, body);
+                copyStartBtn.textContent = 'Copy';
+                copyProgressWrap.hidden = false;
+                copyProgressFill.style.width = '0%';
+                copyProgressPct.textContent = '0%';
+                copyProgressBytes.textContent = '—';
+                copyProgressRate.textContent = '—';
+                copyProgressEta.textContent = '—';
+                copyProgressStatus.textContent = 'Starting copy…';
+                startCopyPoll();
+            } catch (err) {
+                showCopyError(err.message);
+                copyStartBtn.textContent = prevLabel;
+            } finally {
+                copyStartBtn.disabled = false;
+            }
+        });
+
+        copyStopBtn.addEventListener('click', async () => {
+            if (copyTorrentId == null) return;
+            copyStopBtn.disabled = true;
+            try {
+                await postJson(`/api/torrent/${copyTorrentId}/copy/stop`);
+                toast('Stopping copy…', 'info');
+            } catch (err) {
+                toast(`Stop failed: ${err.message}`, 'error');
+            } finally {
+                copyStopBtn.disabled = false;
+            }
+        });
+
+        document.getElementById('modal-copy').addEventListener('click', e => {
+            // Stop polling when the modal closes via overlay click. The
+            // explicit Close button uses data-close which triggers the
+            // generic close handler; piggyback on the same close to clear
+            // state.
+            if (e.target.id === 'modal-copy') {
+                copyTorrentId = null;
+                stopCopyPoll();
+            }
+        });
+
+        // Hook into the generic close-button delegate by listening for the
+        // modal becoming hidden via Escape or X.
+        const copyModalEl = document.getElementById('modal-copy');
+        const copyModalObserver = new MutationObserver(() => {
+            if (copyModalEl.hidden) {
+                copyTorrentId = null;
+                stopCopyPoll();
+            }
+        });
+        copyModalObserver.observe(copyModalEl, { attributes: true, attributeFilter: ['hidden'] });
+
+        [copySubfolderEl, copyRenameEl, copyShowNameEl, copyShowYearEl, copyShowSeasonEl].forEach(el => {
+            el.addEventListener('input', () => {
+                clearCopyError();
+                setCopyDestPreview();
+            });
+        });
+        copyFolderEl.addEventListener('change', () => {
+            clearCopyError();
+            setCopyDestPreview();
+            refreshCopyDrives();
+        });
+        copyMediaTypeEl.addEventListener('change', () => {
+            applyCopyMediaTypeUI();
+            clearCopyError();
+            setCopyDestPreview();
+            // Media type changes the size estimate (show mode counts only
+            // video files), so the picked drive can change too.
+            refreshCopyDrives();
+            if (copyMediaTypeEl.value === 'show' && copyTorrentId != null) {
+                detectSeasonsForTorrent(copyTorrentId);
+            }
+        });
+
+        // ----- filter tabs -----
+
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                activeFilter = tab.dataset.filter;
+                render();
+            });
+        });
+
+        // ----- column sort selects -----
+
+        document.querySelectorAll('.column-sort-select').forEach(sel => {
+            const column = sel.dataset.column;
+            const saved = columnSorts[column];
+            // Fall back to default if the saved value isn't an option any more
+            // (e.g. after a rename in a future revision).
+            if (saved && sel.querySelector(`option[value="${saved}"]`)) {
+                sel.value = saved;
+            } else {
+                sel.value = 'default';
+                columnSorts[column] = 'default';
+            }
+            sel.addEventListener('change', () => {
+                columnSorts[column] = sel.value;
+                saveColumnSorts();
+                render();
+            });
+        });
+
+        // ----- boot -----
+
+        let storagePollHandle = null;
+        let mediaStoragePollHandle = null;
+        let mullvadPollHandle = null;
+
+        function startPolling() {
+            if (!mainPollHandle) {
+                mainPollHandle = setInterval(() => { poll(); pollCopyStates(); }, 5000);
+            }
+            if (!storagePollHandle) {
+                storagePollHandle = setInterval(pollStorage, 10000);
+            }
+            // Media-server df is served from a 10-min server-side cache, so
+            // polling more often than that just wastes round-trips.
+            if (!mediaStoragePollHandle) {
+                mediaStoragePollHandle = setInterval(pollMediaStorage, 600000);
+            }
+            // Mullvad expiry only changes when the account is topped up; the
+            // server caches for 1 hour so polling every hour is plenty.
+            if (!mullvadPollHandle) {
+                mullvadPollHandle = setInterval(pollMullvad, 3600000);
+            }
+        }
+
+        function stopPolling() {
+            if (mainPollHandle) { clearInterval(mainPollHandle); mainPollHandle = null; }
+            if (storagePollHandle) { clearInterval(storagePollHandle); storagePollHandle = null; }
+            if (mediaStoragePollHandle) { clearInterval(mediaStoragePollHandle); mediaStoragePollHandle = null; }
+            if (mullvadPollHandle) { clearInterval(mullvadPollHandle); mullvadPollHandle = null; }
+        }
+
+        // Pause polling when the tab is backgrounded. A backgrounded tab can't
+        // render updates anyway, and on the Pi those wasted RPCs add up across
+        // sessions. Mirror system.html's behaviour.
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopPolling();
+            } else {
+                // Immediate refresh on return so the user doesn't stare at
+                // stale numbers for up to 5s.
+                poll();
+                pollStorage();
+                pollMediaStorage();
+                pollMullvad();
+                pollCopyStates();
+                loadUnloaded();
+                startPolling();
+            }
+        });
+
+        poll();
+        pollStorage();
+        pollMediaStorage();
+        pollMullvad();
+        pollCopyStates();
+        syncUnloadedOpen();
+        loadUnloaded();
+        startPolling();
+    </script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>

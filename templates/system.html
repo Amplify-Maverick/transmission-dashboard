@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>System — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link active">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <main class="system-page">
+        <div class="system-container">
+            <div class="form-error" id="system-error" hidden></div>
+
+            <div class="system-grid">
+                <section class="system-card system-card-wide" id="card-torrents">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Torrents</h2>
+                        <span class="system-card-sub" id="torrents-sub">—</span>
+                    </header>
+                    <div class="metric-grid stats-headline">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Total seeded</span>
+                            <span class="metric-cell-value" id="stat-uploaded">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Total downloaded</span>
+                            <span class="metric-cell-value" id="stat-downloaded">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Lifetime ratio</span>
+                            <span class="metric-cell-value" id="stat-ratio">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Library size</span>
+                            <span class="metric-cell-value" id="stat-library">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Combined seed time</span>
+                            <span class="metric-cell-value" id="stat-seed-time">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Daemon uptime</span>
+                            <span class="metric-cell-value" id="stat-daemon-uptime">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Talking to</span>
+                            <span class="metric-cell-value" id="stat-swarm">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Mix</span>
+                            <span class="metric-cell-value" id="stat-mix">—</span>
+                        </div>
+                    </div>
+
+                    <h3 class="stats-section-title">Hall of fame</h3>
+                    <dl class="stats-superlatives">
+                        <dt>Biggest torrent</dt>
+                        <dd id="sup-biggest">—</dd>
+                        <dt>Longest seeder</dt>
+                        <dd id="sup-longest">—</dd>
+                        <dt>Best ratio</dt>
+                        <dd id="sup-best-ratio">—</dd>
+                        <dt>Oldest torrent</dt>
+                        <dd id="sup-oldest">—</dd>
+                    </dl>
+
+                    <h3 class="stats-section-title">Top seeded</h3>
+                    <ol class="stats-top-list" id="top-uploaders">
+                        <li class="stats-top-empty">—</li>
+                    </ol>
+
+                    <h3 class="stats-section-title">Dashboard activity</h3>
+                    <div class="metric-grid">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Copied to media server</span>
+                            <span class="metric-cell-value" id="stat-copy-bytes">—</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="system-card" id="card-cpu">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">CPU</h2>
+                        <span class="system-card-sub" id="cpu-sub">—</span>
+                    </header>
+                    <div class="metric-row">
+                        <span class="metric-label">Usage</span>
+                        <span class="metric-value" id="cpu-percent">—</span>
+                    </div>
+                    <div class="meter">
+                        <div class="meter-fill" id="cpu-bar" style="width: 0%"></div>
+                    </div>
+                    <div class="metric-grid">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Load 1m</span>
+                            <span class="metric-cell-value" id="load-1">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Load 5m</span>
+                            <span class="metric-cell-value" id="load-5">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Load 15m</span>
+                            <span class="metric-cell-value" id="load-15">—</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="system-card" id="card-memory">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Memory</h2>
+                        <span class="system-card-sub" id="memory-sub">—</span>
+                    </header>
+                    <div class="metric-row">
+                        <span class="metric-label">RAM</span>
+                        <span class="metric-value" id="memory-percent">—</span>
+                    </div>
+                    <div class="meter">
+                        <div class="meter-fill" id="memory-bar" style="width: 0%"></div>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-label">Swap</span>
+                        <span class="metric-value" id="swap-percent">—</span>
+                    </div>
+                    <div class="meter">
+                        <div class="meter-fill" id="swap-bar" style="width: 0%"></div>
+                    </div>
+                    <p class="metric-hint" id="swap-sub">—</p>
+                </section>
+
+                <section class="system-card" id="card-disk">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Disk</h2>
+                        <span class="system-card-sub" id="disk-sub">—</span>
+                    </header>
+                    <div class="metric-row">
+                        <span class="metric-label">Used</span>
+                        <span class="metric-value" id="disk-percent">—</span>
+                    </div>
+                    <div class="meter">
+                        <div class="meter-fill" id="disk-bar" style="width: 0%"></div>
+                    </div>
+                    <p class="metric-hint">
+                        <span id="disk-free">—</span> free of <span id="disk-total">—</span>
+                    </p>
+                </section>
+
+                <section class="system-card" id="card-network">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Network</h2>
+                        <span class="system-card-sub">All interfaces</span>
+                    </header>
+                    <div class="metric-grid">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">↓ In</span>
+                            <span class="metric-cell-value" id="net-rx-rate">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">↑ Out</span>
+                            <span class="metric-cell-value" id="net-tx-rate">—</span>
+                        </div>
+                    </div>
+                    <div class="metric-grid">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Total received</span>
+                            <span class="metric-cell-value" id="net-rx-total">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Total sent</span>
+                            <span class="metric-cell-value" id="net-tx-total">—</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="system-card system-card-wide" id="card-tunnel">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Tunnel</h2>
+                        <span class="system-card-sub" id="tunnel-sub">—</span>
+                    </header>
+                    <div class="metric-row">
+                        <span class="metric-label">Interface</span>
+                        <span class="metric-value" id="tunnel-iface-state">—</span>
+                    </div>
+                    <div class="metric-grid">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Address</span>
+                            <span class="metric-cell-value" id="tunnel-address">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Endpoint</span>
+                            <span class="metric-cell-value" id="tunnel-endpoint">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Last handshake</span>
+                            <span class="metric-cell-value" id="tunnel-handshake">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Transfer (rx / tx)</span>
+                            <span class="metric-cell-value" id="tunnel-transfer">—</span>
+                        </div>
+                    </div>
+                    <p class="metric-hint" id="tunnel-bind">—</p>
+                </section>
+
+                <section class="system-card system-card-wide" id="card-host">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Host</h2>
+                        <span class="system-card-sub" id="host-boot">—</span>
+                    </header>
+                    <div class="metric-grid">
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Uptime</span>
+                            <span class="metric-cell-value" id="host-uptime">—</span>
+                        </div>
+                        <div class="metric-cell">
+                            <span class="metric-cell-label">Processes</span>
+                            <span class="metric-cell-value" id="host-processes">—</span>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <div class="toast-container" id="toasts"></div>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link active">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script>
+        // 5s, not 2s: each /api/system hit runs five psutil probes
+        // (including a full /proc scan for the process count) on the Pi,
+        // and the difference is invisible for slow-moving system metrics.
+        const POLL_MS = 5000;
+        const TUNNEL_POLL_MS = 10000;
+        const STATS_POLL_MS = 15000;
+        let unauthorizedHandled = false;
+        let pollTimer = null;
+        let tunnelTimer = null;
+        let statsTimer = null;
+        // In-flight guards: setInterval fires on schedule even when the
+        // previous request hasn't finished, so a slow backend used to pile
+        // up overlapping requests until gunicorn's threads were saturated.
+        let pollBusy = false;
+        let tunnelBusy = false;
+        let statsBusy = false;
+
+        const errorEl = document.getElementById('system-error');
+
+        function unauthorizedRedirect() {
+            if (unauthorizedHandled) return;
+            unauthorizedHandled = true;
+            window.location.href = '/login';
+        }
+
+        function setLive(ok) {
+            const dot = document.querySelector('.live-dot');
+            const label = document.querySelector('.live-label');
+            dot.dataset.state = ok ? 'ok' : 'err';
+            label.textContent = ok ? 'Live' : 'Stale';
+        }
+
+        function showError(msg) {
+            errorEl.textContent = msg;
+            errorEl.hidden = false;
+        }
+        function clearError() {
+            errorEl.hidden = true;
+            errorEl.textContent = '';
+        }
+
+        function fmtBytes(n) {
+            if (n == null || isNaN(n)) return '—';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+            let i = 0;
+            let v = n;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return `${v < 10 && i > 0 ? v.toFixed(2) : v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+        }
+
+        function fmtRate(bps) {
+            if (bps == null || isNaN(bps)) return '—';
+            return `${fmtBytes(bps)}/s`;
+        }
+
+        function fmtPct(p) {
+            if (p == null || isNaN(p)) return '—';
+            return `${p.toFixed(1)}%`;
+        }
+
+        function fmtDuration(secs) {
+            if (secs == null || isNaN(secs) || secs <= 0) return '—';
+            const years = Math.floor(secs / (365 * 86400));
+            const days = Math.floor((secs % (365 * 86400)) / 86400);
+            const hours = Math.floor((secs % 86400) / 3600);
+            if (years > 0) return `${years}y ${days}d`;
+            if (days > 0) return `${days}d ${hours}h`;
+            const mins = Math.floor((secs % 3600) / 60);
+            if (hours > 0) return `${hours}h ${mins}m`;
+            return `${mins}m`;
+        }
+
+        function fmtRatio(r) {
+            if (r == null || isNaN(r) || r < 0) return '—';
+            return r.toFixed(2);
+        }
+
+        function fmtCount(n) {
+            if (n == null || isNaN(n)) return '—';
+            return n.toLocaleString();
+        }
+
+        function fmtUptime(secs) {
+            if (secs == null || isNaN(secs)) return '—';
+            const d = Math.floor(secs / 86400);
+            const h = Math.floor((secs % 86400) / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            const parts = [];
+            if (d) parts.push(`${d}d`);
+            if (h || d) parts.push(`${h}h`);
+            parts.push(`${m}m`);
+            return parts.join(' ');
+        }
+
+        function fmtBootTime(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return iso;
+            return `Booted ${d.toLocaleString()}`;
+        }
+
+        function setBar(id, percent) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const p = Math.max(0, Math.min(100, percent || 0));
+            el.style.width = `${p}%`;
+            let state = 'ok';
+            if (p >= 90) state = 'crit';
+            else if (p >= 75) state = 'warn';
+            el.dataset.state = state;
+        }
+
+        function render(d) {
+            // CPU
+            const cpu = d.cpu || {};
+            document.getElementById('cpu-percent').textContent = fmtPct(cpu.percent);
+            setBar('cpu-bar', cpu.percent);
+            const logical = cpu.count || 0;
+            const physical = cpu.count_physical || 0;
+            const cpuSub = physical && physical !== logical
+                ? `${logical} threads · ${physical} cores`
+                : `${logical} ${logical === 1 ? 'core' : 'cores'}`;
+            document.getElementById('cpu-sub').textContent = cpuSub;
+            const [l1, l5, l15] = cpu.load_avg || [0, 0, 0];
+            document.getElementById('load-1').textContent = l1.toFixed(2);
+            document.getElementById('load-5').textContent = l5.toFixed(2);
+            document.getElementById('load-15').textContent = l15.toFixed(2);
+
+            // Memory
+            const mem = d.memory || {};
+            document.getElementById('memory-percent').textContent = fmtPct(mem.percent);
+            setBar('memory-bar', mem.percent);
+            document.getElementById('memory-sub').textContent =
+                `${fmtBytes(mem.used)} / ${fmtBytes(mem.total)}`;
+
+            // Swap
+            const swap = d.swap || {};
+            document.getElementById('swap-percent').textContent = fmtPct(swap.percent);
+            setBar('swap-bar', swap.percent);
+            document.getElementById('swap-sub').textContent =
+                swap.total > 0
+                    ? `${fmtBytes(swap.used)} / ${fmtBytes(swap.total)}`
+                    : 'No swap configured';
+
+            // Network
+            const net = d.network || {};
+            document.getElementById('net-rx-rate').textContent = fmtRate(net.rx_rate);
+            document.getElementById('net-tx-rate').textContent = fmtRate(net.tx_rate);
+            document.getElementById('net-rx-total').textContent = fmtBytes(net.bytes_recv);
+            document.getElementById('net-tx-total').textContent = fmtBytes(net.bytes_sent);
+
+            // Host
+            const host = d.host || {};
+            document.getElementById('host-uptime').textContent = fmtUptime(host.uptime_seconds);
+            document.getElementById('host-processes').textContent =
+                host.process_count != null ? host.process_count : '—';
+            document.getElementById('host-boot').textContent = fmtBootTime(host.boot_time);
+        }
+
+        function renderDisk(d) {
+            const disk = (d && d.disk) || {};
+            document.getElementById('disk-percent').textContent = fmtPct(disk.percent);
+            setBar('disk-bar', disk.percent);
+            document.getElementById('disk-sub').textContent = disk.path || '—';
+            document.getElementById('disk-free').textContent = fmtBytes(disk.free);
+            document.getElementById('disk-total').textContent = fmtBytes(disk.total);
+        }
+
+        function fmtHandshake(secs, staleAfter) {
+            if (secs === null || secs === undefined) return '—';
+            let txt;
+            if (secs < 60) txt = `${secs}s ago`;
+            else if (secs < 3600) txt = `${Math.floor(secs / 60)}m ${secs % 60}s ago`;
+            else {
+                const h = Math.floor(secs / 3600);
+                const m = Math.floor((secs % 3600) / 60);
+                txt = `${h}h ${m}m ago`;
+            }
+            if (staleAfter && secs > staleAfter) txt += ' (stale)';
+            return txt;
+        }
+
+        function renderTunnel(t) {
+            if (!t || t.ok === false) {
+                document.getElementById('tunnel-sub').textContent = 'unavailable';
+                document.getElementById('tunnel-iface-state').textContent =
+                    (t && t.error) ? t.error : '—';
+                return;
+            }
+            const sub = {
+                ok: 'healthy',
+                warn: 'attention',
+                down: 'down',
+                unknown: 'partial',
+            }[t.overall || 'unknown'] || '—';
+            document.getElementById('tunnel-sub').textContent =
+                `${t.interface || 'wg'} · ${sub}`;
+            let stateText;
+            if (!t.interface_exists) {
+                stateText = 'missing';
+            } else {
+                stateText = t.interface_up ? 'up' : 'down';
+            }
+            document.getElementById('tunnel-iface-state').textContent = stateText;
+            document.getElementById('tunnel-address').textContent = t.interface_address || '—';
+            document.getElementById('tunnel-endpoint').textContent = t.endpoint || '—';
+            document.getElementById('tunnel-handshake').textContent =
+                fmtHandshake(t.last_handshake_seconds, t.stale_after_seconds);
+            const rx = t.rx_bytes !== null && t.rx_bytes !== undefined ? fmtBytes(t.rx_bytes) : '—';
+            const tx = t.tx_bytes !== null && t.tx_bytes !== undefined ? fmtBytes(t.tx_bytes) : '—';
+            document.getElementById('tunnel-transfer').textContent = `${rx} / ${tx}`;
+            let bindText;
+            if (t.transmission_bound === true) {
+                bindText = `Transmission bound to ${t.transmission_bind_address}`;
+            } else if (t.transmission_bound === false) {
+                bindText = `Transmission NOT bound — bind-address-ipv4=${t.transmission_bind_address || '0.0.0.0'}. Set it to ${t.interface_address || 'the tunnel IP'} so outbound torrent traffic stays on the tunnel.`;
+            } else if (t.transmission_bind_address) {
+                bindText = `Transmission bind-address-ipv4=${t.transmission_bind_address}`;
+            } else {
+                bindText = 'Transmission bind address: unknown';
+            }
+            document.getElementById('tunnel-bind').textContent = bindText;
+        }
+
+        function setText(id, value) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = value;
+        }
+
+        function superlativeText(s, valueFormatter) {
+            if (!s || !s.name) return '—';
+            const val = valueFormatter(s.value);
+            return val ? `${s.name} — ${val}` : s.name;
+        }
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function renderTopUploaders(list) {
+            const el = document.getElementById('top-uploaders');
+            if (!el) return;
+            if (!Array.isArray(list) || list.length === 0) {
+                el.innerHTML = '<li class="stats-top-empty">—</li>';
+                return;
+            }
+            el.innerHTML = list.map((t, i) => {
+                const name = escapeHtml(t.name || `torrent ${t.id ?? ''}`);
+                return `<li>`
+                    + `<span class="stats-top-rank">${i + 1}</span>`
+                    + `<span class="stats-top-name" title="${name}">${name}</span>`
+                    + `<span class="stats-top-value">${fmtBytes(t.value)}</span>`
+                    + `</li>`;
+            }).join('');
+        }
+
+        function renderStats(data) {
+            if (!data || data.ok === false) return;
+            const t = data.torrents || {};
+            const lt = data.lifetime || {};
+            const sup = data.superlatives || {};
+            const hist = data.history || {};
+
+            setText('torrents-sub',
+                `${fmtCount(t.count)} total · ↓ ${fmtRate(t.download_speed)} · ↑ ${fmtRate(t.upload_speed)}`);
+            setText('stat-uploaded', fmtBytes(lt.uploaded_bytes));
+            setText('stat-downloaded', fmtBytes(lt.downloaded_bytes));
+            setText('stat-ratio', fmtRatio(lt.ratio));
+            setText('stat-library', fmtBytes(t.library_bytes));
+            setText('stat-seed-time', fmtDuration(lt.seed_seconds));
+            setText('stat-daemon-uptime', fmtDuration(lt.seconds_active));
+            setText('stat-swarm',
+                `${fmtCount(t.swarm_peers)} ${t.swarm_peers === 1 ? 'peer' : 'peers'}`);
+            const mix = t.status_counts || {};
+            setText('stat-mix',
+                `${mix.seeding || 0} seed · ${mix.downloading || 0} down · ${mix.paused || 0} paused`);
+
+            const bytesValue = v => v ? fmtBytes(v) : '';
+            const ratioValue = v => v ? `ratio ${fmtRatio(v)}` : '';
+            const timeValue = v => v ? `${fmtDuration(v)}` : '';
+            const dateValue = v => {
+                if (!v || v <= 0) return '';
+                const d = new Date(v * 1000);
+                if (isNaN(d.getTime())) return '';
+                const days = Math.floor((Date.now() / 1000 - v) / 86400);
+                return days > 0 ? `${d.toLocaleDateString()} (${days}d ago)` : d.toLocaleDateString();
+            };
+            setText('sup-biggest', superlativeText(sup.biggest, bytesValue));
+            setText('sup-longest', superlativeText(sup.longest_seeder, timeValue));
+            setText('sup-best-ratio', superlativeText(sup.best_ratio, ratioValue));
+            setText('sup-oldest', superlativeText(sup.oldest, dateValue));
+            renderTopUploaders(sup.top_uploaders);
+
+            const copyDone = hist.copies_done || 0;
+            const copyText = copyDone
+                ? `${fmtBytes(hist.copy_bytes)} · ${fmtCount(copyDone)} copies`
+                : fmtBytes(hist.copy_bytes);
+            setText('stat-copy-bytes', copyText);
+        }
+
+        async function pollStats() {
+            if (statsBusy) return;
+            statsBusy = true;
+            try {
+                const res = await fetch('/api/stats', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                renderStats(data);
+            } catch (_) {} finally {
+                statsBusy = false;
+            }
+        }
+
+        async function pollTunnel() {
+            if (tunnelBusy) return;
+            tunnelBusy = true;
+            try {
+                const res = await fetch('/api/tunnel', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) {
+                    renderTunnel({ ok: false, error: 'HTTP ' + res.status });
+                    return;
+                }
+                renderTunnel(await res.json());
+            } catch (err) {
+                renderTunnel({ ok: false, error: err.message });
+            } finally {
+                tunnelBusy = false;
+            }
+        }
+
+        async function poll() {
+            if (pollBusy) return;
+            pollBusy = true;
+            try {
+                const res = await fetch('/api/system', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                if (data.ok === false) throw new Error(data.error || 'request failed');
+                render(data);
+                // The /api/system payload already carries disk data; a
+                // separate pollDisk used to re-fetch the same endpoint on
+                // its own timer just to paint the disk card.
+                renderDisk(data);
+                setLive(true);
+                clearError();
+            } catch (err) {
+                setLive(false);
+                showError('Failed to load metrics: ' + err.message);
+            } finally {
+                pollBusy = false;
+            }
+        }
+
+        function start() {
+            poll();
+            pollTunnel();
+            pollStats();
+            pollTimer = setInterval(poll, POLL_MS);
+            tunnelTimer = setInterval(pollTunnel, TUNNEL_POLL_MS);
+            statsTimer = setInterval(pollStats, STATS_POLL_MS);
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                if (tunnelTimer) { clearInterval(tunnelTimer); tunnelTimer = null; }
+                if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+            } else if (!pollTimer) {
+                start();
+            }
+        });
+
+        start();
+    </script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Settings — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link active">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <main class="settings-page">
+        <div class="settings-container">
+            <section class="settings-section">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Downloads</h2>
+                    <p class="settings-section-hint">
+                        Where new torrents are saved. Existing torrents are unaffected.
+                    </p>
+                </header>
+
+                <div class="form-error" id="settings-error" hidden></div>
+
+                <div class="settings-field">
+                    <label class="field-label" for="download-dir-input">Download directory</label>
+                    <input
+                        type="text"
+                        id="download-dir-input"
+                        placeholder="/var/lib/transmission-daemon/downloads"
+                        autocomplete="off"
+                        spellcheck="false"
+                    >
+                    <p class="field-hint">Must be an absolute path that the Transmission daemon can write to.</p>
+                </div>
+
+                <div class="settings-actions">
+                    <button type="button" class="btn" id="reset-btn">Reset</button>
+                    <button type="button" class="btn btn-primary" id="save-btn">Save</button>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Media server (copy over SSH)</h2>
+                    <p class="settings-section-hint">
+                        Where the per-torrent <strong>Copy to media server</strong> action sends files.
+                        Uses <code>rsync</code> over SSH — set up key-based auth from this host to the media server
+                        (e.g. <code>ssh-copy-id user@host</code>) so it can run without prompting.
+                    </p>
+                </header>
+
+                <div class="form-error" id="media-error" hidden></div>
+                <div class="form-error" id="media-tailscale-auth" hidden>
+                    Tailscale needs to be re-authenticated. Open
+                    <a id="media-tailscale-auth-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+                    to sign in, then test again.
+                </div>
+                <div class="form-info" id="media-info" hidden></div>
+
+                <div class="settings-grid">
+                    <div class="settings-field">
+                        <label class="field-label" for="media-user-input">User</label>
+                        <input type="text" id="media-user-input" placeholder="mediauser" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label" for="media-host-input">Host / IP</label>
+                        <input type="text" id="media-host-input" placeholder="100.64.1.5" autocomplete="off" spellcheck="false">
+                        <p class="field-hint">Tailscale IPs work — anything <code>ssh</code> can reach.</p>
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label" for="media-port-input">Port</label>
+                        <input type="number" id="media-port-input" placeholder="22" min="1" max="65535">
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label" for="media-bwlimit-input">Copy speed limit (KB/s)</label>
+                        <input type="number" id="media-bwlimit-input" placeholder="unlimited" min="0">
+                        <p class="field-hint">Caps rsync so copies don't starve Transmission. Empty or 0 = unlimited.</p>
+                    </div>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label">Destination folders</label>
+                    <p class="field-hint">
+                        Give each folder a label (shown in the dropdown when copying) and the absolute path on the media server.
+                        Reusing a label across rows makes them a fallback group — copies land on the first row with enough free space.
+                        The optional <strong>Plex section</strong> column is the numeric ID of the library to refresh after a copy
+                        (only used when library refresh is set to Plex below).
+                    </p>
+                    <div class="media-folders" id="media-folders"></div>
+                    <div>
+                        <button type="button" class="btn btn-sm" id="media-add-folder-btn">+ Add folder</button>
+                    </div>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="library-type-select">Library refresh</label>
+                    <p class="field-hint">
+                        Trigger a Plex or Jellyfin library scan after a copy finishes so the new file shows up immediately.
+                    </p>
+                    <div class="settings-grid">
+                        <div class="settings-field">
+                            <label class="field-label" for="library-type-select">Type</label>
+                            <select id="library-type-select">
+                                <option value="none">None</option>
+                                <option value="plex">Plex</option>
+                                <option value="jellyfin">Jellyfin</option>
+                            </select>
+                        </div>
+                        <div class="settings-field" id="library-url-field" hidden>
+                            <label class="field-label" for="library-url-input">URL</label>
+                            <input type="text" id="library-url-input" placeholder="http://media-server:32400" autocomplete="off" spellcheck="false">
+                        </div>
+                        <div class="settings-field" id="library-token-field" hidden>
+                            <label class="field-label" for="library-token-input">Token</label>
+                            <input type="text" id="library-token-input" placeholder="X-Plex-Token / Jellyfin API key" autocomplete="off" spellcheck="false">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-actions">
+                    <button type="button" class="btn" id="media-test-btn">Test connection</button>
+                    <button type="button" class="btn btn-primary" id="media-save-btn">Save</button>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Existing torrents</h2>
+                    <p class="settings-section-hint">
+                        Use this if you moved files on disk and Transmission is still pointing at the old location.
+                        Updates each torrent's <code>downloadDir</code> to the directory above.
+                        Files are <strong>not</strong> moved — Transmission's bookkeeping is updated to look in the new location.
+                    </p>
+                </header>
+
+                <div class="settings-actions">
+                    <button type="button" class="btn" id="relocate-btn">
+                        Relocate all torrents to current directory
+                    </button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Confirm relocate modal -->
+    <div class="modal-overlay" id="modal-relocate" hidden>
+        <div class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="relocate-title">
+            <header class="modal-header">
+                <h2 id="relocate-title">Relocate all torrents</h2>
+                <button class="modal-close" type="button" data-close="modal-relocate" aria-label="Close">&times;</button>
+            </header>
+            <div class="modal-body">
+                <p>Update every torrent's location to the current download directory?</p>
+                <p id="relocate-target" class="modal-torrent-name"></p>
+                <p class="field-hint">
+                    Files on disk are not touched. Transmission will start looking for each torrent's files at
+                    <code>&lt;new directory&gt;/&lt;torrent name&gt;</code>. If a torrent's files aren't actually there,
+                    Transmission will error when it next tries to seed or verify.
+                </p>
+            </div>
+            <footer class="modal-footer">
+                <button class="btn" type="button" data-close="modal-relocate">Cancel</button>
+                <button class="btn btn-primary" type="button" id="relocate-confirm">Relocate</button>
+            </footer>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toasts"></div>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link active" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script>
+        let initialDir = "";
+        let unauthorizedHandled = false;
+
+        const errorEl = document.getElementById('settings-error');
+        const input = document.getElementById('download-dir-input');
+        const saveBtn = document.getElementById('save-btn');
+        const resetBtn = document.getElementById('reset-btn');
+
+        function unauthorizedRedirect() {
+            if (unauthorizedHandled) return;
+            unauthorizedHandled = true;
+            window.location.href = '/login';
+        }
+
+        function showError(msg) {
+            errorEl.textContent = msg;
+            errorEl.hidden = false;
+        }
+
+        function clearError() {
+            errorEl.hidden = true;
+            errorEl.textContent = '';
+        }
+
+        function setSavingState(saving) {
+            saveBtn.disabled = saving;
+            resetBtn.disabled = saving;
+            input.disabled = saving;
+            saveBtn.textContent = saving ? 'Saving…' : 'Save';
+        }
+
+        function setLive(ok) {
+            const dot = document.querySelector('.live-dot');
+            const label = document.querySelector('.live-label');
+            dot.dataset.state = ok ? 'ok' : 'err';
+            label.textContent = ok ? 'Live' : 'Stale';
+        }
+
+        async function loadSettings() {
+            try {
+                const res = await fetch('/api/settings');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                initialDir = data.download_dir || '';
+                input.value = initialDir;
+                setLive(true);
+            } catch (err) {
+                setLive(false);
+                showError('Failed to load settings: ' + err.message);
+            }
+        }
+
+        async function saveSettings() {
+            clearError();
+            const value = input.value.trim();
+            if (!value) {
+                showError('Download directory cannot be empty.');
+                return;
+            }
+            if (!value.startsWith('/')) {
+                showError('Download directory must be an absolute path (starting with /).');
+                return;
+            }
+            setSavingState(true);
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ download_dir: value }),
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                let data = null;
+                try { data = await res.json(); } catch (_) {}
+                if (!res.ok || (data && data.ok === false)) {
+                    throw new Error((data && data.error) || ('HTTP ' + res.status));
+                }
+                initialDir = data.download_dir || value;
+                input.value = initialDir;
+                toast('Settings saved', 'success');
+            } catch (err) {
+                showError('Save failed: ' + err.message);
+            } finally {
+                setSavingState(false);
+            }
+        }
+
+        function toast(message, type = 'info') {
+            const container = document.getElementById('toasts');
+            const el = document.createElement('div');
+            el.className = `toast toast-${type}`;
+            el.textContent = message;
+            container.appendChild(el);
+            requestAnimationFrame(() => el.classList.add('toast-show'));
+            setTimeout(() => {
+                el.classList.remove('toast-show');
+                el.classList.add('toast-hide');
+                setTimeout(() => el.remove(), 300);
+            }, 2700);
+        }
+
+        saveBtn.addEventListener('click', saveSettings);
+        resetBtn.addEventListener('click', () => {
+            input.value = initialDir;
+            clearError();
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                saveSettings();
+            }
+        });
+        input.addEventListener('input', clearError);
+
+        // ----- media destination -----
+
+        const mediaUserEl = document.getElementById('media-user-input');
+        const mediaHostEl = document.getElementById('media-host-input');
+        const mediaPortEl = document.getElementById('media-port-input');
+        const mediaBwlimitEl = document.getElementById('media-bwlimit-input');
+        const mediaFoldersEl = document.getElementById('media-folders');
+        const mediaAddFolderBtn = document.getElementById('media-add-folder-btn');
+        const mediaErrorEl = document.getElementById('media-error');
+        const mediaInfoEl = document.getElementById('media-info');
+        const mediaTailscaleAuthEl = document.getElementById('media-tailscale-auth');
+        const mediaTailscaleAuthLink = document.getElementById('media-tailscale-auth-link');
+        const mediaSaveBtn = document.getElementById('media-save-btn');
+        const mediaTestBtn = document.getElementById('media-test-btn');
+
+        function buildFolderRow(name = '', path = '', plexSectionId = '') {
+            const row = document.createElement('div');
+            row.className = 'media-folder-row';
+            row.innerHTML = `
+                <input type="text" class="media-folder-name" placeholder="Movies" autocomplete="off" spellcheck="false">
+                <input type="text" class="media-folder-path" placeholder="/mnt/media/movies" autocomplete="off" spellcheck="false">
+                <input type="text" class="media-folder-plex" placeholder="Plex §" autocomplete="off" spellcheck="false" inputmode="numeric" title="Plex section ID (number)">
+                <button type="button" class="btn btn-sm media-folder-remove" aria-label="Remove folder">&times;</button>
+            `;
+            row.querySelector('.media-folder-name').value = name;
+            row.querySelector('.media-folder-path').value = path;
+            row.querySelector('.media-folder-plex').value = plexSectionId;
+            row.querySelector('.media-folder-remove').addEventListener('click', () => {
+                row.remove();
+                if (!mediaFoldersEl.querySelector('.media-folder-row')) {
+                    mediaFoldersEl.appendChild(buildFolderRow());
+                }
+                clearMediaBanner();
+            });
+            row.querySelectorAll('input').forEach(el => el.addEventListener('input', clearMediaBanner));
+            return row;
+        }
+
+        function renderFolders(folders) {
+            mediaFoldersEl.innerHTML = '';
+            if (!folders || folders.length === 0) {
+                mediaFoldersEl.appendChild(buildFolderRow());
+                return;
+            }
+            folders.forEach(f => mediaFoldersEl.appendChild(buildFolderRow(
+                f.name || '', f.path || '', f.plex_section_id || ''
+            )));
+        }
+
+        function collectFolders() {
+            const rows = mediaFoldersEl.querySelectorAll('.media-folder-row');
+            const out = [];
+            rows.forEach(row => {
+                const name = row.querySelector('.media-folder-name').value.trim();
+                const path = row.querySelector('.media-folder-path').value.trim();
+                const plexSectionId = row.querySelector('.media-folder-plex').value.trim();
+                if (name || path) {
+                    const entry = { name, path };
+                    if (plexSectionId) entry.plex_section_id = plexSectionId;
+                    out.push(entry);
+                }
+            });
+            return out;
+        }
+
+        // ----- library refresh -----
+
+        const libraryTypeEl = document.getElementById('library-type-select');
+        const libraryUrlEl = document.getElementById('library-url-input');
+        const libraryTokenEl = document.getElementById('library-token-input');
+        const libraryUrlField = document.getElementById('library-url-field');
+        const libraryTokenField = document.getElementById('library-token-field');
+
+        function syncLibraryFields() {
+            const show = libraryTypeEl.value !== 'none';
+            libraryUrlField.hidden = !show;
+            libraryTokenField.hidden = !show;
+        }
+        libraryTypeEl.addEventListener('change', () => {
+            syncLibraryFields();
+            clearMediaBanner();
+        });
+        [libraryUrlEl, libraryTokenEl].forEach(el => el.addEventListener('input', clearMediaBanner));
+
+        function applyLibraryConfig(cfg) {
+            const lib = (cfg && cfg.library_refresh) || {};
+            libraryTypeEl.value = lib.type || 'none';
+            libraryUrlEl.value = lib.url || '';
+            libraryTokenEl.value = lib.token || '';
+            syncLibraryFields();
+        }
+
+        function collectLibraryConfig() {
+            const type = libraryTypeEl.value;
+            if (type === 'none') return { type: 'none' };
+            return {
+                type,
+                url: libraryUrlEl.value.trim(),
+                token: libraryTokenEl.value.trim(),
+            };
+        }
+
+        function showMediaError(msg) {
+            mediaInfoEl.hidden = true;
+            mediaErrorEl.textContent = msg;
+            mediaErrorEl.hidden = false;
+        }
+        function showMediaInfo(msg) {
+            mediaErrorEl.hidden = true;
+            mediaInfoEl.textContent = msg;
+            mediaInfoEl.hidden = false;
+        }
+        function showMediaTailscaleAuth(url) {
+            if (!url || !/^https:\/\/login\.tailscale\.com\//.test(url)) {
+                mediaTailscaleAuthEl.hidden = true;
+                return;
+            }
+            mediaTailscaleAuthLink.href = url;
+            mediaTailscaleAuthLink.textContent = url;
+            mediaTailscaleAuthEl.hidden = false;
+        }
+        function clearMediaBanner() {
+            mediaErrorEl.hidden = true;
+            mediaInfoEl.hidden = true;
+            mediaTailscaleAuthEl.hidden = true;
+        }
+
+        async function loadMediaConfig() {
+            try {
+                const res = await fetch('/api/media/config');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                const cfg = (data && data.config) || {};
+                mediaUserEl.value = cfg.user || '';
+                mediaHostEl.value = cfg.host || '';
+                mediaPortEl.value = cfg.port || 22;
+                mediaBwlimitEl.value = cfg.bwlimit_kbps || '';
+                renderFolders(cfg.folders);
+                applyLibraryConfig(cfg);
+            } catch (err) {
+                showMediaError('Failed to load media config: ' + err.message);
+                renderFolders([]);
+                applyLibraryConfig({});
+            }
+        }
+
+        async function saveMediaConfig() {
+            clearMediaBanner();
+            const folders = collectFolders();
+            const library_refresh = collectLibraryConfig();
+            const bwlimitRaw = mediaBwlimitEl.value.trim();
+            const bwlimit = bwlimitRaw === '' ? 0 : parseInt(bwlimitRaw, 10);
+            if (Number.isNaN(bwlimit) || bwlimit < 0) {
+                showMediaError('Copy speed limit must be a non-negative number (KB/s).');
+                return;
+            }
+            const body = {
+                user: mediaUserEl.value.trim(),
+                host: mediaHostEl.value.trim(),
+                port: parseInt(mediaPortEl.value, 10) || 22,
+                bwlimit_kbps: bwlimit,
+                folders,
+                library_refresh,
+            };
+            if (!body.user || !body.host) {
+                showMediaError('User and host are required.');
+                return;
+            }
+            if (folders.length === 0) {
+                showMediaError('Add at least one destination folder.');
+                return;
+            }
+            const seenPaths = new Set();
+            for (const f of folders) {
+                if (!f.name) { showMediaError('Every folder needs a name.'); return; }
+                if (!f.path) { showMediaError(`Folder '${f.name}' is missing a path.`); return; }
+                if (!f.path.startsWith('/')) {
+                    showMediaError(`Folder '${f.name}' path must be absolute.`);
+                    return;
+                }
+                if (f.plex_section_id && !/^\d+$/.test(f.plex_section_id)) {
+                    showMediaError(`Folder '${f.name}' Plex section must be a number.`);
+                    return;
+                }
+                if (seenPaths.has(f.path)) {
+                    showMediaError(`Duplicate folder path '${f.path}'.`);
+                    return;
+                }
+                seenPaths.add(f.path);
+            }
+            if (library_refresh.type !== 'none') {
+                if (!library_refresh.url || !/^https?:\/\//.test(library_refresh.url)) {
+                    showMediaError('Library refresh URL must start with http:// or https://');
+                    return;
+                }
+                if (!library_refresh.token) {
+                    showMediaError('Library refresh token is required.');
+                    return;
+                }
+            }
+            mediaSaveBtn.disabled = true;
+            mediaTestBtn.disabled = true;
+            const prevLabel = mediaSaveBtn.textContent;
+            mediaSaveBtn.textContent = 'Saving…';
+            try {
+                const res = await fetch('/api/media/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                let data = null;
+                try { data = await res.json(); } catch (_) {}
+                if (!res.ok || (data && data.ok === false)) {
+                    throw new Error((data && data.error) || ('HTTP ' + res.status));
+                }
+                toast('Media destination saved', 'success');
+            } catch (err) {
+                showMediaError('Save failed: ' + err.message);
+            } finally {
+                mediaSaveBtn.disabled = false;
+                mediaTestBtn.disabled = false;
+                mediaSaveBtn.textContent = prevLabel;
+            }
+        }
+
+        async function testMediaConnection() {
+            clearMediaBanner();
+            const body = {
+                user: mediaUserEl.value.trim(),
+                host: mediaHostEl.value.trim(),
+                port: parseInt(mediaPortEl.value, 10) || 22,
+            };
+            if (!body.user || !body.host) {
+                showMediaError('User and host are required to test the connection.');
+                return;
+            }
+            mediaTestBtn.disabled = true;
+            const prevLabel = mediaTestBtn.textContent;
+            mediaTestBtn.textContent = 'Testing…';
+            try {
+                const res = await fetch('/api/media/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                let data = null;
+                try { data = await res.json(); } catch (_) {}
+                if (data && data.ok) {
+                    showMediaInfo('Connection succeeded.');
+                } else {
+                    showMediaError('Connection failed: ' + ((data && data.error) || ('HTTP ' + res.status)));
+                    if (data && data.tailscale_auth_url) {
+                        showMediaTailscaleAuth(data.tailscale_auth_url);
+                    }
+                }
+            } catch (err) {
+                showMediaError('Test failed: ' + err.message);
+            } finally {
+                mediaTestBtn.disabled = false;
+                mediaTestBtn.textContent = prevLabel;
+            }
+        }
+
+        mediaSaveBtn.addEventListener('click', saveMediaConfig);
+        mediaTestBtn.addEventListener('click', testMediaConnection);
+        mediaAddFolderBtn.addEventListener('click', () => {
+            mediaFoldersEl.appendChild(buildFolderRow());
+            clearMediaBanner();
+        });
+        [mediaUserEl, mediaHostEl, mediaPortEl, mediaBwlimitEl].forEach(el => {
+            el.addEventListener('input', clearMediaBanner);
+        });
+
+        loadMediaConfig();
+
+        // ----- relocate all -----
+
+        const relocateBtn = document.getElementById('relocate-btn');
+        const relocateConfirmBtn = document.getElementById('relocate-confirm');
+        const relocateTarget = document.getElementById('relocate-target');
+        const modalRelocate = document.getElementById('modal-relocate');
+
+        function openModal(id) { document.getElementById(id).hidden = false; }
+        function closeModal(id) { document.getElementById(id).hidden = true; }
+
+        document.addEventListener('click', e => {
+            const closeId = e.target.dataset && e.target.dataset.close;
+            if (closeId) closeModal(closeId);
+        });
+        document.querySelectorAll('.modal-overlay').forEach(ov => {
+            ov.addEventListener('click', e => {
+                if (e.target === ov) closeModal(ov.id);
+            });
+        });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal-overlay:not([hidden])').forEach(ov => closeModal(ov.id));
+            }
+        });
+
+        relocateBtn.addEventListener('click', () => {
+            if (!initialDir) {
+                showError('Save a download directory first.');
+                return;
+            }
+            relocateTarget.textContent = initialDir;
+            openModal('modal-relocate');
+        });
+
+        relocateConfirmBtn.addEventListener('click', async () => {
+            relocateConfirmBtn.disabled = true;
+            relocateBtn.disabled = true;
+            const prevConfirmLabel = relocateConfirmBtn.textContent;
+            relocateConfirmBtn.textContent = 'Relocating…';
+            try {
+                const res = await fetch('/api/settings/relocate-all', { method: 'POST' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                let data = null;
+                try { data = await res.json(); } catch (_) {}
+                if (!res.ok || (data && data.ok === false)) {
+                    throw new Error((data && data.error) || ('HTTP ' + res.status));
+                }
+                closeModal('modal-relocate');
+                const updated = data.updated || 0;
+                const total = data.total || 0;
+                const skipped = total - updated - (data.failures || []).length;
+                let msg = `Relocated ${updated} of ${total} torrents`;
+                if (skipped > 0) msg += ` (${skipped} already there)`;
+                if ((data.failures || []).length) {
+                    msg += ` — ${data.failures.length} failed`;
+                    toast(msg, 'error');
+                } else {
+                    toast(msg, 'success');
+                }
+            } catch (err) {
+                showError('Relocate failed: ' + err.message);
+                closeModal('modal-relocate');
+            } finally {
+                relocateConfirmBtn.disabled = false;
+                relocateBtn.disabled = false;
+                relocateConfirmBtn.textContent = prevConfirmLabel;
+            }
+        });
+
+        loadSettings();
+    </script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>

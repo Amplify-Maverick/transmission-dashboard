@@ -1,0 +1,327 @@
+import json
+import logging
+import os
+import threading
+import time
+
+import requests
+from requests.auth import HTTPBasicAuth
+
+import config
+
+# Slow/failed RPCs are logged at WARNING so they reach gunicorn's error log
+# (journald) with no logging config needed — the server-side record to
+# correlate with the UI's "Stale" indicator.
+_SLOW_RPC_SEC = 2.0
+_log = logging.getLogger("transmission.rpc")
+
+# Transmission status codes:
+# 0 = stopped
+# 1 = check pending
+# 2 = checking
+# 3 = download pending
+# 4 = downloading
+# 5 = seed pending
+# 6 = seeding
+
+TORRENT_FIELDS = [
+    "id",
+    "name",
+    "hashString",
+    "status",
+    "percentDone",
+    "rateDownload",
+    "rateUpload",
+    "uploadRatio",
+    "eta",
+    "totalSize",
+    "labels",
+    "downloadDir",
+    "addedDate",
+    "error",
+    "errorString",
+    "peersConnected",
+    "peersSendingToUs",
+    "peersGettingFromUs",
+    "doneDate",
+]
+
+# Detail-view fields for the per-torrent expand panel. Kept separate from
+# the list query so the main poll stays cheap — `peers` + `trackerStats`
+# are big per-torrent payloads we don't want to ship for every row on
+# every poll.
+DETAIL_FIELDS = TORRENT_FIELDS + [
+    "activityDate",
+    "startDate",
+    "secondsDownloading",
+    "secondsSeeding",
+    "downloadedEver",
+    "uploadedEver",
+    "corruptEver",
+    "haveValid",
+    "haveUnchecked",
+    "leftUntilDone",
+    "sizeWhenDone",
+    "pieceCount",
+    "pieceSize",
+    "peersConnected",
+    "peersGettingFromUs",
+    "peersSendingToUs",
+    "peers",
+    "trackerStats",
+    "seedRatioLimit",
+    "seedRatioMode",
+    "queuePosition",
+    "isPrivate",
+    "comment",
+    "creator",
+    "dateCreated",
+    "magnetLink",
+]
+
+
+class TransmissionError(Exception):
+    """Raised when the daemon is unreachable, rejects auth, or returns a
+    non-success RPC result. Message is safe to surface to the UI."""
+    pass
+
+
+class TransmissionClient:
+    def __init__(self, host=None, port=None, user=None, password=None):
+        self.host = host or config.TR_HOST
+        self.port = port or config.TR_PORT
+        self.user = user or config.TR_USER
+        self.password = password or config.TR_PASS
+        self.url = f"http://{self.host}:{self.port}/transmission/rpc"
+        self.session_id = ""
+        # Serialises session-id refreshes. Gunicorn threads share this
+        # client; when the daemon rotates the CSRF id, several in-flight
+        # requests all get 409s at once and used to clobber session_id
+        # with whatever header each saw, causing extra 409 round-trips.
+        self._sid_lock = threading.Lock()
+        # Persistent HTTP session keeps the TCP connection to transmission-
+        # daemon warm across polls. The dashboard polls every 5s and was
+        # paying a fresh connect + auth handshake per call.
+        self._http = requests.Session()
+        self._http.auth = HTTPBasicAuth(self.user, self.password)
+        # (mtime, value) cache for the settings.json bind-address read so
+        # repeated tunnel checks don't re-parse the file every call.
+        self._settings_bind_cache = (None, None)
+
+    # (connect, read) timeout. The old flat 30s meant a bogged-down daemon
+    # could pin a gunicorn thread for half a minute per poll; with only 8
+    # threads, piled-up polls stalled the whole dashboard. Failing fast at
+    # 10s keeps threads available — the UI just shows one stale tick.
+    _TIMEOUT = (3.05, 10)
+
+    def request(self, method, arguments=None):
+        start = time.monotonic()
+        try:
+            data = self._do_request(method, arguments)
+        except TransmissionError as e:
+            _log.warning("RPC %s failed after %.2fs: %s",
+                         method, time.monotonic() - start, e)
+            raise
+        elapsed = time.monotonic() - start
+        if elapsed >= _SLOW_RPC_SEC:
+            _log.warning("RPC %s slow: %.2fs", method, elapsed)
+        return data
+
+    def _do_request(self, method, arguments=None):
+        payload = {"method": method, "arguments": arguments or {}}
+
+        try:
+            response = self._http.post(
+                self.url,
+                json=payload,
+                headers={"X-Transmission-Session-Id": self.session_id},
+                timeout=self._TIMEOUT,
+            )
+
+            if response.status_code == 409:
+                # Adopt the fresh id under the lock; another thread may have
+                # already stored a newer one, in which case keep it rather
+                # than racing each other back and forth.
+                fresh = response.headers.get("X-Transmission-Session-Id", "")
+                with self._sid_lock:
+                    if fresh:
+                        self.session_id = fresh
+                    sid = self.session_id
+                response = self._http.post(
+                    self.url,
+                    json=payload,
+                    headers={"X-Transmission-Session-Id": sid},
+                    timeout=self._TIMEOUT,
+                )
+        except requests.exceptions.ConnectionError as e:
+            raise TransmissionError(
+                f"Cannot reach Transmission RPC at {self.url}: {e}. "
+                "Check the daemon is running, the port is open, and TR_HOST/TR_PORT are correct."
+            ) from e
+        except requests.exceptions.Timeout as e:
+            raise TransmissionError(
+                f"Timed out contacting Transmission RPC at {self.url}"
+            ) from e
+
+        if response.status_code == 401:
+            raise TransmissionError(
+                f"Transmission RPC rejected credentials (401) for user '{self.user}'. "
+                "Check TR_USER / TR_PASS in .env match the new server's settings.json."
+            )
+        if response.status_code == 403:
+            raise TransmissionError(
+                "Transmission RPC denied (403). Check rpc-host-whitelist / "
+                "rpc-whitelist in settings.json on the daemon."
+            )
+
+        if not response.ok:
+            raise TransmissionError(
+                f"Transmission RPC HTTP {response.status_code}: "
+                f"{response.text[:300].strip() or response.reason}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise TransmissionError(
+                f"Transmission RPC returned non-JSON: {response.text[:200].strip()}"
+            ) from e
+
+        # Transmission returns HTTP 200 even when the operation fails;
+        # the JSON "result" field is the real status. e.g. "no such torrent",
+        # "invalid argument", etc.
+        result = data.get("result")
+        if result and result != "success":
+            raise TransmissionError(f"Transmission RPC error: {result}")
+        return data
+
+    def get_torrents(self):
+        result = self.request("torrent-get", {"fields": TORRENT_FIELDS})
+        return result.get("arguments", {}).get("torrents", [])
+
+    def get_stats_torrents(self):
+        """Slim per-torrent payload for aggregate stats. Kept off the main
+        poll because secondsSeeding / uploadedEver / etc. aren't needed for
+        the list view."""
+        result = self.request("torrent-get", {"fields": [
+            "id", "name", "status", "totalSize", "uploadedEver",
+            "downloadedEver", "secondsSeeding", "secondsDownloading",
+            "uploadRatio", "peersConnected", "addedDate",
+        ]})
+        return result.get("arguments", {}).get("torrents", [])
+
+    def get_session_stats(self):
+        """`session-stats` gives cumulative + current totals straight from the
+        daemon — avoids re-summing per-torrent payloads for headline numbers."""
+        result = self.request("session-stats")
+        return result.get("arguments", {})
+
+    def get_torrent_detail(self, id):
+        result = self.request(
+            "torrent-get",
+            {"ids": [id], "fields": DETAIL_FIELDS},
+        )
+        torrents = result.get("arguments", {}).get("torrents", [])
+        return torrents[0] if torrents else None
+
+    def get_torrent_details(self, ids):
+        """Multi-id detail fetch. Transmission's torrent-get RPC already
+        accepts ids: [...], so the entire expand-panel polling loop on the
+        UI side can ride on one round-trip instead of N."""
+        if not ids:
+            return []
+        result = self.request(
+            "torrent-get",
+            {"ids": list(ids), "fields": DETAIL_FIELDS},
+        )
+        return result.get("arguments", {}).get("torrents", [])
+
+    def start(self, id):
+        return self.request("torrent-start", {"ids": [id]})
+
+    def stop(self, id):
+        return self.request("torrent-stop", {"ids": [id]})
+
+    def remove(self, id, delete_local_data=False):
+        return self.request(
+            "torrent-remove",
+            {"ids": [id], "delete-local-data": bool(delete_local_data)},
+        )
+
+    def verify(self, id):
+        return self.request("torrent-verify", {"ids": [id]})
+
+    def set_labels(self, id, labels):
+        return self.request(
+            "torrent-set",
+            {"ids": [id], "labels": list(labels)},
+        )
+
+    def add_magnet(self, magnet, paused=True, download_dir=None):
+        args = {"filename": magnet, "paused": bool(paused)}
+        if download_dir:
+            args["download-dir"] = download_dir
+        return self.request("torrent-add", args)
+
+    def add_torrent_file(self, base64_metainfo):
+        return self.request("torrent-add", {"metainfo": base64_metainfo})
+
+    def get_session(self):
+        result = self.request("session-get", {"fields": ["download-dir"]})
+        return result.get("arguments", {})
+
+    def get_session_bind_address(self):
+        """Return the daemon's bind-address-ipv4, or None if absent.
+
+        Transmission 4.x dropped this field from the session-get RPC
+        response (it's also no longer settable via session-set), so when
+        the RPC omits it we fall back to parsing settings.json — which is
+        now the actual source of truth for this option.
+        """
+        try:
+            result = self.request(
+                "session-get", {"fields": ["bind-address-ipv4"]}
+            )
+            v = result.get("arguments", {}).get("bind-address-ipv4")
+            if v:
+                return v
+        except Exception:
+            pass
+        try:
+            mtime = os.path.getmtime(config.TR_SETTINGS_FILE)
+        except OSError:
+            return None
+        cached_mtime, cached_val = self._settings_bind_cache
+        if cached_mtime == mtime:
+            return cached_val
+        try:
+            with open(config.TR_SETTINGS_FILE, "r") as f:
+                settings = json.load(f)
+            v = settings.get("bind-address-ipv4") or None
+        except (OSError, ValueError):
+            return None
+        self._settings_bind_cache = (mtime, v)
+        return v
+
+    def set_download_dir(self, path):
+        return self.request("session-set", {"download-dir": path})
+
+    def set_location(self, id, location, move=False):
+        return self.request(
+            "torrent-set-location",
+            {"ids": [id], "location": location, "move": bool(move)},
+        )
+
+    def get_torrent_location(self, id):
+        result = self.request(
+            "torrent-get",
+            {"ids": [id], "fields": ["downloadDir", "name"]},
+        )
+        torrents = result.get("arguments", {}).get("torrents", [])
+        if not torrents:
+            return None
+        t = torrents[0]
+        download_dir = t.get("downloadDir") or ""
+        name = t.get("name") or ""
+        return os.path.join(download_dir, name) if name else download_dir
+

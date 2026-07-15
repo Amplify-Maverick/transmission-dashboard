@@ -1,0 +1,59 @@
+#!/bin/bash
+# Push local changes to a server over rsync+ssh, then restart the service.
+#
+# This is the maintainer's personal deploy helper, genericized. Copy it to
+# `deploy.sh` (which is gitignored) and set VPS_HOST to your own server:
+#     cp deploy.sh.example deploy.sh && chmod +x deploy.sh
+#
+# Most people cloning this repo should use `update.sh` on the server instead
+# (git pull based). This script is only useful if you develop locally and
+# rsync to a box you don't want to push through GitHub.
+set -e
+
+# ---- CONFIGURE ME ----
+VPS_HOST="user@your-server"                 # ssh target
+REMOTE_DIR="~/transmission-dashboard"       # where the app lives on the server
+LOCAL_DIR="$(dirname "$(readlink -f "$0")")/"  # this repo (trailing slash matters)
+# ----------------------
+
+echo "=== VPN check ==="
+# Optional: confirm you're on your VPN before shipping. Remove this block if
+# you don't care. Aborts if ipinfo.io is unreachable.
+ip_info=$(curl -s --max-time 5 https://ipinfo.io/json) || {
+    echo "Could not reach ipinfo.io. Aborting."
+    exit 1
+}
+current_ip=$(echo "$ip_info" | grep -oP '"ip"\s*:\s*"\K[^"]+')
+current_city=$(echo "$ip_info" | grep -oP '"city"\s*:\s*"\K[^"]+')
+current_country=$(echo "$ip_info" | grep -oP '"country"\s*:\s*"\K[^"]+')
+current_org=$(echo "$ip_info" | grep -oP '"org"\s*:\s*"\K[^"]+')
+echo "  IP:       $current_ip"
+echo "  Location: $current_city, $current_country"
+echo "  ISP:      $current_org"
+echo
+
+read -rp "Press Enter to deploy to ${VPS_HOST}, or Ctrl+C to abort: " _
+
+echo
+echo "=== Deploying to $VPS_HOST ==="
+# Never ship secrets, the DB, runtime state, or the local venv.
+rsync -avz \
+  --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' \
+  --exclude='.env' --exclude='.flask_secret' \
+  --exclude='dashboard.db' --exclude='dashboard.db-shm' --exclude='dashboard.db-wal' \
+  --exclude='media_config.json' --exclude='copy_state.json' --exclude='scan_state.json' \
+  --exclude='deploy.sh' \
+  "$LOCAL_DIR" \
+  "$VPS_HOST:$REMOTE_DIR/"
+
+# `-t` forces a pty so the sudo prompt can be answered interactively. Without
+# it, `sudo systemctl restart ...` fails with "A terminal is required to
+# authenticate" and the deploy ends with stale code running on the remote.
+ssh -t "$VPS_HOST" "\
+  set -e; \
+  cd $REMOTE_DIR; \
+  if [ ! -x .venv/bin/pip ]; then python3 -m venv .venv; fi && \
+  .venv/bin/pip install -q -r requirements.txt && \
+  sudo systemctl restart transmission-dashboard"
+
+echo "Done."

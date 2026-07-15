@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Events — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link active">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <nav class="tabs" id="event-filters">
+        <button class="tab active" data-filter="all" type="button">All</button>
+        <button class="tab" data-filter="error" type="button">Errors</button>
+        <button class="tab" data-filter="warn" type="button">Warnings</button>
+        <button class="tab" data-filter="info" type="button">Info</button>
+    </nav>
+
+    <main class="settings-page">
+        <div class="settings-container">
+            <section class="settings-section">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Event timeline</h2>
+                    <p class="settings-section-hint">Most recent 200 events. Refreshes every 5s.</p>
+                </header>
+                <ul class="event-list" id="events">
+                    <li class="hist-empty">Loading…</li>
+                </ul>
+            </section>
+        </div>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link active" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script>
+        const MAX_EVENTS = 200;
+        let currentFilter = 'all';
+        let lastEvents = [];  // newest-first, capped at MAX_EVENTS
+        let newestTs = null;  // ISO timestamp of the freshest event we've seen
+
+        function fmtTimestamp(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return iso;
+            return d.toLocaleString();
+        }
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function eventRowHtml(e) {
+            const sev = e.severity || 'info';
+            const torrent = e.torrent_name ? `<span class="event-target">${escapeHtml(e.torrent_name)}</span>` : '';
+            return `
+                <li class="event-row event-${sev}" data-sev="${sev}" data-id="${e.id}">
+                    <span class="event-time">${fmtTimestamp(e.ts)}</span>
+                    <span class="event-type">${escapeHtml(e.type)}</span>
+                    <span class="event-msg">${escapeHtml(e.message)} ${torrent}</span>
+                </li>
+            `;
+        }
+
+        function applyFilterVisibility() {
+            const ul = document.getElementById('events');
+            const rows = ul.querySelectorAll('li[data-sev]');
+            let shown = 0;
+            for (const li of rows) {
+                const visible = currentFilter === 'all' || li.dataset.sev === currentFilter;
+                li.hidden = !visible;
+                if (visible) shown++;
+            }
+            // Reuse the existing empty-state row (it has class hist-empty
+            // and no data-sev) when nothing matches the current filter.
+            let emptyRow = ul.querySelector('li.hist-empty');
+            if (shown === 0) {
+                if (!emptyRow) {
+                    const li = document.createElement('li');
+                    li.className = 'hist-empty';
+                    li.textContent = 'No events.';
+                    ul.appendChild(li);
+                }
+            } else if (emptyRow) {
+                emptyRow.remove();
+            }
+        }
+
+        function initialRender() {
+            const ul = document.getElementById('events');
+            if (lastEvents.length === 0) {
+                ul.innerHTML = '<li class="hist-empty">No events.</li>';
+                return;
+            }
+            ul.innerHTML = lastEvents.map(eventRowHtml).join('');
+            applyFilterVisibility();
+        }
+
+        function prependNew(newEvents) {
+            // newEvents arrives newest-first from the API. Prepend to keep
+            // the list newest-at-top without rebuilding the whole DOM.
+            const ul = document.getElementById('events');
+            const empty = ul.querySelector('li.hist-empty');
+            if (empty) empty.remove();
+            const frag = document.createDocumentFragment();
+            const wrap = document.createElement('div');
+            wrap.innerHTML = newEvents.map(eventRowHtml).join('');
+            // Append in order; the API order is newest-first so prepending
+            // each row to the parent yields the same order as the source.
+            for (const node of Array.from(wrap.children)) {
+                frag.appendChild(node);
+            }
+            ul.insertBefore(frag, ul.firstChild);
+            // Trim excess rows from the bottom — the in-memory list and
+            // the DOM both cap at MAX_EVENTS.
+            while (ul.children.length > MAX_EVENTS) {
+                ul.removeChild(ul.lastChild);
+            }
+            applyFilterVisibility();
+        }
+
+        let loadBusy = false;
+        async function load() {
+            if (loadBusy) return;
+            loadBusy = true;
+            try {
+                const url = newestTs
+                    ? `/api/events?limit=${MAX_EVENTS}&since=${encodeURIComponent(newestTs)}`
+                    : `/api/events?limit=${MAX_EVENTS}`;
+                const r = await fetch(url);
+                if (r.status === 401) { location.href = '/login'; return; }
+                const data = await r.json();
+                const fresh = (data && data.events) || [];
+                if (newestTs === null) {
+                    lastEvents = fresh;
+                    if (fresh.length) newestTs = fresh[0].ts;
+                    initialRender();
+                } else if (fresh.length) {
+                    lastEvents = fresh.concat(lastEvents).slice(0, MAX_EVENTS);
+                    newestTs = fresh[0].ts;
+                    prependNew(fresh);
+                }
+                document.querySelector('.live-dot').dataset.state = 'ok';
+                document.querySelector('.live-label').textContent = 'Live';
+            } catch (e) {
+                document.querySelector('.live-dot').dataset.state = 'err';
+                document.querySelector('.live-label').textContent = 'Stale';
+            } finally {
+                loadBusy = false;
+            }
+        }
+
+        document.querySelectorAll('#event-filters .tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('#event-filters .tab').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentFilter = btn.dataset.filter;
+                applyFilterVisibility();
+            });
+        });
+
+        // Pause polling while the tab is hidden, mirroring the torrents and
+        // system pages. The `since` cursor means the refresh on return only
+        // fetches what was missed.
+        let loadTimer = null;
+        function startLoadPoll() {
+            if (loadTimer) return;
+            load();
+            loadTimer = setInterval(load, 5000);
+        }
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                if (loadTimer) { clearInterval(loadTimer); loadTimer = null; }
+            } else {
+                startLoadPoll();
+            }
+        });
+        startLoadPoll();
+    </script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>

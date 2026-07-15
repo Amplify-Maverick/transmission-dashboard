@@ -1,0 +1,22 @@
+# Secrets — never commit these
+.env
+.flask_secret
+
+# Runtime database (auto-creates on first run)
+dashboard.db
+dashboard.db-wal
+dashboard.db-shm
+
+# Runtime state files (auto-create on first run / via the Settings UI)
+media_config.json
+copy_state.json
+scan_state.json
+
+# Personal deployment script (ship deploy.sh.example instead)
+deploy.sh
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/

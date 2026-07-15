@@ -1,0 +1,58 @@
+# transmission-dashboard systemd unit (template)
+#
+# Install:
+#   1. Copy this file, replacing every CHANGE_ME:
+#        sudo cp systemd/transmission-dashboard.service.example \
+#          /etc/systemd/system/transmission-dashboard.service
+#        sudoedit /etc/systemd/system/transmission-dashboard.service
+#   2. Set User=/Group= to the account that owns the checkout, and
+#      WorkingDirectory= to the absolute path of this repo on the server.
+#   3. Make sure a virtualenv exists at <repo>/.venv with the deps installed:
+#        python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   4. Enable and start:
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now transmission-dashboard
+#   5. Logs: journalctl -u transmission-dashboard -f
+
+[Unit]
+Description=Transmission Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+Group=CHANGE_ME
+WorkingDirectory=/home/CHANGE_ME/transmission-dashboard
+EnvironmentFile=/home/CHANGE_ME/transmission-dashboard/.env
+# Single worker, threaded. This is a single-user dashboard — extra workers
+# don't add capacity, but they fragment the in-process scan/copy registry
+# (a /api/scan/<id>/stop request landing in the other worker returns 404
+# because the cancel Event lives in the worker that started the scan) and
+# the in-memory caches (custom names, copy state, scan state). One worker
+# + threads keeps everything in one address space.
+# No --access-logfile: the dashboard polls several endpoints per second,
+# and logging every poll wrote a journald line each — constant CPU/I/O for
+# zero diagnostic value. Errors still go to the journal via --error-logfile.
+ExecStart=/home/CHANGE_ME/transmission-dashboard/.venv/bin/gunicorn \
+    --bind 127.0.0.1:5000 \
+    --workers 1 \
+    --threads 8 \
+    --error-logfile - \
+    app:app
+Restart=on-failure
+RestartSec=5
+
+# `wg show` makes a netlink call that requires CAP_NET_ADMIN; without it the
+# tunnel-status check sees no handshake and always reports "down". Only
+# relevant if you use the WireGuard tunnel indicator — harmless otherwise.
+# The setcap re-applies on every start so an `apt upgrade` of wireguard-tools
+# (which strips file caps on replacement) doesn't silently regress this.
+# `+` runs the pre-step as root regardless of User=; `|| true` keeps the unit
+# bootable if wg is missing for any reason.
+ExecStartPre=+/bin/sh -c '/sbin/setcap cap_net_admin+ep "$(command -v wg)" || true'
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
