@@ -28,6 +28,72 @@ sudo apt install python3 python3-venv rsync openssh-client
 
 ---
 
+## Set up Transmission first
+
+The dashboard is a **front-end for an existing `transmission-daemon`** — it does
+not install or manage the daemon itself. Get Transmission running with RPC
+enabled before you set up the dashboard. (Skip this section entirely if you only
+want to try the UI with `USE_MOCK=true`.)
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install transmission-daemon
+```
+
+The RPC settings live in `settings.json` (on the Debian/Ubuntu package,
+`/etc/transmission-daemon/settings.json`). **Important: stop the daemon before
+editing it** — Transmission rewrites this file on exit and will overwrite your
+changes otherwise:
+
+```bash
+sudo systemctl stop transmission-daemon
+sudo $EDITOR /etc/transmission-daemon/settings.json
+```
+
+Set at least these keys so the dashboard can reach the RPC:
+
+```jsonc
+{
+  "rpc-enabled": true,
+  "rpc-authentication-required": true,
+  "rpc-username": "your-rpc-user",
+  "rpc-password": "your-rpc-password",   // plaintext here; Transmission
+                                          // hashes it on next start
+  "rpc-whitelist-enabled": true,
+  "rpc-whitelist": "127.0.0.1",           // widen if the dashboard runs on a
+                                          // different host than the daemon
+  "download-dir": "/var/lib/transmission-daemon/downloads"
+}
+```
+
+Then start it again:
+
+```bash
+sudo systemctl start transmission-daemon
+sudo systemctl enable transmission-daemon    # start on boot
+```
+
+These map directly onto the dashboard's `.env` (next section):
+
+| `settings.json` | `.env` |
+|-----------------|--------|
+| host the daemon runs on | `TR_HOST` (default `127.0.0.1`) |
+| `rpc-port` (default 9091) | `TR_PORT` |
+| `rpc-username` | `TR_USER` |
+| `rpc-password` | `TR_PASS` |
+| `download-dir` | `DOWNLOAD_DIR` |
+
+Quick sanity check that RPC is up and your credentials work:
+
+```bash
+transmission-remote 127.0.0.1:9091 -n 'your-rpc-user:your-rpc-password' -l
+```
+
+That should list torrents (or an empty list) rather than an auth error.
+
+---
+
 ## Install
 
 ```bash
