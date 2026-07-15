@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Binding to Mullvad WireGuard — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link active">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <main class="guide-page">
+        <div class="guide-container">
+            <a href="{{ url_for('settings') }}" class="guide-back">&lsaquo; Back to Settings</a>
+
+            <article class="guide-article">
+                <h1>Binding transmission-daemon to a Mullvad WireGuard Tunnel</h1>
+
+                <p>
+                    Complete setup guide for Ubuntu Server (tested on Raspberry Pi 4, Ubuntu Server 26.04,
+                    Transmission 4.x). Following these steps exactly gets <code>transmission-daemon</code> bound
+                    to a Mullvad WireGuard interface with split-tunnel routing (SSH/Tailscale untouched), a
+                    UID-based kill switch, and boot persistence.
+                </p>
+
+                <p><strong>Architecture at a glance:</strong></p>
+                <ul>
+                    <li>WireGuard interface named <code>mullvad</code>, brought up via <code>wg-quick</code></li>
+                    <li><code>Table = off</code> prevents the tunnel from hijacking the default route (protects SSH)</li>
+                    <li>Policy routing (table 200) makes traffic sourced from the tunnel IPs actually route through
+                        the tunnel — <strong>required</strong>, not optional; binding alone does not work without it</li>
+                    <li>Transmission binds to the tunnel IPs (both IPv4 and IPv6)</li>
+                    <li>iptables/ip6tables kill switch restricts the <code>debian-transmission</code> user to
+                        loopback + tunnel only</li>
+                    <li>RPC locked to localhost with authentication</li>
+                </ul>
+
+                <hr>
+
+                <h2>Prerequisites</h2>
+                <ul>
+                    <li>Ubuntu Server with root/sudo access</li>
+                    <li>A Mullvad account</li>
+                    <li>If accessing the machine remotely: keep a second SSH session open during setup as a safety net</li>
+                </ul>
+
+                <h2>Step 1: Install packages</h2>
+                <pre><code>sudo apt update
+sudo apt install wireguard wireguard-tools transmission-daemon -y</code></pre>
+                <p>Verify:</p>
+                <pre><code>wg --version</code></pre>
+
+                <h2>Step 2: Generate and download a Mullvad WireGuard config</h2>
+                <ol>
+                    <li>Go to <a href="https://mullvad.net/en/account/wireguard-config" target="_blank" rel="noopener noreferrer">https://mullvad.net/en/account/wireguard-config</a> and log in</li>
+                    <li>Generate a key / select a device</li>
+                    <li>Pick a server location</li>
+                    <li>Download the <code>.conf</code> file (e.g. <code>at-vie-wg-102.conf</code>)</li>
+                </ol>
+
+                <h2>Step 3: Transfer the config to the server</h2>
+                <p>From your local machine:</p>
+                <pre><code>scp ~/Downloads/&lt;filename&gt;.conf user@&lt;server&gt;:/tmp/</code></pre>
+                <p>On the server:</p>
+                <pre><code>sudo mv /tmp/&lt;filename&gt;.conf /etc/wireguard/mullvad.conf
+sudo chmod 600 /etc/wireguard/mullvad.conf
+sudo chown root:root /etc/wireguard/mullvad.conf</code></pre>
+
+                <h2>Step 4: Note your tunnel IPs</h2>
+                <pre><code>sudo cat /etc/wireguard/mullvad.conf</code></pre>
+                <p>Find the <code>Address</code> line. It contains your IPv4 and IPv6 tunnel addresses, e.g.:</p>
+                <pre><code>Address = 10.75.112.58/32,fc00:bbbb:bbbb:bb01::c:7039/128</code></pre>
+                <p>
+                    <strong>These two IPs are used throughout the rest of this guide.</strong> Wherever you see
+                    <code>&lt;TUNNEL_IPV4&gt;</code> or <code>&lt;TUNNEL_IPV6&gt;</code> below, substitute your
+                    actual values (without the <code>/32</code> or <code>/128</code> suffix).
+                </p>
+
+                <h2>Step 5: Edit the config — add split-tunnel routing</h2>
+                <pre><code>sudo nano /etc/wireguard/mullvad.conf</code></pre>
+                <p>Edit it to match this structure, keeping your own <code>PrivateKey</code>, <code>Address</code>,
+                    <code>PublicKey</code>, and <code>Endpoint</code> values:</p>
+                <pre><code>[Interface]
+# Device: &lt;your device name&gt;
+PrivateKey = &lt;unchanged&gt;
+Address = &lt;TUNNEL_IPV4&gt;/32,&lt;TUNNEL_IPV6&gt;/128
+Table = off
+MTU = 1380
+DNS = 10.64.0.1
+PostUp = ip route add default dev mullvad src &lt;TUNNEL_IPV4&gt; scope link table 200; ip rule add from &lt;TUNNEL_IPV4&gt; table 200; ip -6 route add default dev mullvad table 200; ip -6 rule add from &lt;TUNNEL_IPV6&gt; table 200
+PostDown = ip rule delete from &lt;TUNNEL_IPV4&gt; table 200; ip route delete default dev mullvad table 200 2&gt;/dev/null || true; ip -6 rule delete from &lt;TUNNEL_IPV6&gt; table 200; ip -6 route delete default dev mullvad table 200 2&gt;/dev/null || true
+
+[Peer]
+PublicKey = &lt;unchanged&gt;
+AllowedIPs = 0.0.0.0/0,::0/0
+Endpoint = &lt;unchanged&gt;</code></pre>
+                <p>What each addition does:</p>
+                <ul>
+                    <li><strong><code>Table = off</code></strong> — prevents WireGuard from installing itself as the
+                        system default route. Without this, all traffic (including your SSH session) gets routed
+                        through the tunnel. This is what keeps remote access safe.</li>
+                    <li><strong><code>MTU = 1380</code></strong> — conservative MTU that avoids fragmentation issues
+                        on home-network paths with extra encapsulation layers.</li>
+                    <li><strong><code>PostUp</code> policy routing</strong> — because <code>Table = off</code>
+                        disables automatic routing, traffic sourced from the tunnel IPs has no route to the tunnel
+                        without these rules. This step is mandatory: Transmission's bind-address setting sets the
+                        <em>source IP</em> of its packets, but the kernel needs these rules to know that packets
+                        from that source IP go out via <code>mullvad</code>. Without them, bound traffic silently
+                        goes nowhere.</li>
+                    <li><strong><code>DNS = 10.64.0.1</code></strong> — Mullvad's internal resolver. Note: if
+                        <code>wg-quick up</code> fails with <code>resolvconf: command not found</code>, either
+                        install resolvconf (<code>sudo apt install resolvconf</code>) or simply delete this DNS
+                        line — it is not required for Transmission to work.</li>
+                </ul>
+
+                <h2>Step 6: Bring up the tunnel and verify</h2>
+                <p>If accessing remotely, open a second SSH session first and keep it open.</p>
+                <pre><code>sudo wg-quick up mullvad
+sudo wg show</code></pre>
+                <p><code>wg show</code> may not show a <code>latest handshake</code> line until traffic is sent —
+                    WireGuard is lazy and only handshakes on demand. Force it and verify everything at once:</p>
+                <pre><code>curl --interface &lt;TUNNEL_IPV4&gt; https://am.i.mullvad.net/json</code></pre>
+                <p>Expected: JSON containing <code>"mullvad_exit_ip": true</code>. If you get this, the tunnel,
+                    routing, and DNS are all working.</p>
+                <p>Verify UDP works through the tunnel too (TCP working does NOT imply UDP works — test both):</p>
+                <pre><code>dig @8.8.8.8 google.com -b &lt;TUNNEL_IPV4&gt;</code></pre>
+                <p>Expected: a normal DNS answer, not a timeout. If this times out, the policy routing from Step 5
+                    is missing or wrong — recheck <code>ip rule show</code> and <code>ip route show table 200</code>.</p>
+                <p>Confirm your SSH session still works by opening one more fresh connection.</p>
+
+                <h2>Step 7: Enable the tunnel on boot</h2>
+                <pre><code>sudo systemctl enable wg-quick@mullvad.service</code></pre>
+
+                <h2>Step 8: Configure transmission-daemon</h2>
+                <p>
+                    <strong>Critical rule for editing settings.json:</strong> transmission-daemon rewrites
+                    <code>settings.json</code> from memory on every shutdown. If you edit the file while the daemon
+                    is running (or not fully stopped), your changes get silently overwritten. Always follow this
+                    sequence:
+                </p>
+                <pre><code>sudo systemctl stop transmission-daemon
+pgrep -af transmission-daemon    # MUST return nothing before you edit
+sudo nano /etc/transmission-daemon/settings.json</code></pre>
+                <p>(Note: use <code>pgrep -af</code>, not <code>pgrep -a</code> — the process name exceeds the
+                    kernel's 15-character matching limit, so plain pgrep gives false negatives.)</p>
+                <p>Set these keys (edit existing ones; add any that are missing):</p>
+                <pre><code>"bind-address-ipv4": "&lt;TUNNEL_IPV4&gt;",
+"bind-address-ipv6": "&lt;TUNNEL_IPV6&gt;",
+"peer-port-random-on-start": true,
+"port-forwarding-enabled": false,
+
+"rpc-enabled": true,
+"rpc-bind-address": "127.0.0.1",
+"rpc-authentication-required": true,
+"rpc-username": "transmission",
+"rpc-password": "YourPasswordHere",
+"rpc-whitelist-enabled": true,
+"rpc-whitelist": "127.0.0.1",
+"rpc-host-whitelist-enabled": true,
+"rpc-host-whitelist": "127.0.0.1"</code></pre>
+                <p>Notes:</p>
+                <ul>
+                    <li><strong>The bind addresses must exactly match the tunnel's current IPs.</strong> If you ever
+                        switch Mullvad servers/configs, the tunnel IPs change and these two fields MUST be updated
+                        to match, or Transmission cannot connect to anything. This is the single most common
+                        failure point.</li>
+                    <li><code>port-forwarding-enabled: false</code> — Mullvad discontinued port forwarding in 2023;
+                        Transmission's UPnP attempts through the tunnel are useless. Peer connectivity works via
+                        outbound connections, DHT, and PEX.</li>
+                    <li>The <code>rpc-password</code> is written in plaintext; Transmission hashes it automatically
+                        on next start.</li>
+                    <li>Avoid <code>$</code>, <code>'</code>, and <code>"</code> characters in the password — they
+                        get mangled by bash when passed via <code>--auth</code> unless carefully quoted.</li>
+                    <li>RPC bound to <code>127.0.0.1</code> means the web UI/RPC is only reachable from the machine
+                        itself (or through an SSH tunnel), never exposed publicly.</li>
+                </ul>
+                <p>Verify your edits saved before starting:</p>
+                <pre><code>sudo cat /etc/transmission-daemon/settings.json | grep -E "bind-address|rpc-bind"</code></pre>
+
+                <h2>Step 9: Start and verify bindings</h2>
+                <pre><code>sudo systemctl start transmission-daemon
+sudo ss -tlnp | grep transmission</code></pre>
+                <p>Expected output — three listeners:</p>
+                <ul>
+                    <li>Peer port on <code>&lt;TUNNEL_IPV4&gt;</code> (NOT 0.0.0.0)</li>
+                    <li>Peer port on <code>[&lt;TUNNEL_IPV6&gt;]</code> (NOT [::])</li>
+                    <li>RPC port 9091 on <code>127.0.0.1</code> (NOT 0.0.0.0)</li>
+                </ul>
+                <p>If the IPv6 listener shows your real LAN IPv6 address instead of the tunnel IPv6, the
+                    <code>bind-address-ipv6</code> field is missing or wrong — that is an IPv6 leak vector; fix it
+                    before proceeding.</p>
+
+                <h2>Step 10: Verify RPC authentication</h2>
+                <pre><code>export TR_AUTH="transmission:YourPasswordHere"
+transmission-remote --auth "$TR_AUTH" -l</code></pre>
+                <p>Expected: an empty torrent list with a <code>Sum:</code> line, no <code>401</code> error.</p>
+                <p>To persist the auth variable across sessions:</p>
+                <pre><code>echo 'export TR_AUTH="transmission:YourPasswordHere"' &gt;&gt; ~/.bashrc
+source ~/.bashrc</code></pre>
+                <p>(Plaintext in <code>.bashrc</code> — acceptable for a single-user machine, but know the tradeoff.)</p>
+
+                <h2>Step 11: Add the kill switch (IPv4 AND IPv6)</h2>
+                <p>The bind address alone is not a kill switch — if the tunnel drops and comes back with a different
+                    IP, or any code path doesn't respect the binding, traffic could use the real interface. These
+                    rules make it impossible: the <code>debian-transmission</code> user can only send packets via
+                    loopback or the tunnel.</p>
+                <pre><code>sudo iptables  -A OUTPUT -m owner --uid-owner debian-transmission -o lo      -j ACCEPT
+sudo iptables  -A OUTPUT -m owner --uid-owner debian-transmission -o mullvad -j ACCEPT
+sudo iptables  -A OUTPUT -m owner --uid-owner debian-transmission            -j DROP
+
+sudo ip6tables -A OUTPUT -m owner --uid-owner debian-transmission -o lo      -j ACCEPT
+sudo ip6tables -A OUTPUT -m owner --uid-owner debian-transmission -o mullvad -j ACCEPT
+sudo ip6tables -A OUTPUT -m owner --uid-owner debian-transmission            -j DROP</code></pre>
+                <p>Rule order matters (evaluated top-down): allow loopback, allow tunnel, drop everything else —
+                    for that UID only. All other users/services are unaffected.</p>
+                <p>The IPv6 rules are NOT optional: Transmission binds an IPv6 listener, and without ip6tables
+                    rules, IPv6 traffic has no kill switch.</p>
+                <p>Verify:</p>
+                <pre><code>sudo iptables -L OUTPUT -v -n
+sudo ip6tables -L OUTPUT -v -n</code></pre>
+
+                <h2>Step 12: Persist the kill switch across reboots</h2>
+                <pre><code>sudo apt install iptables-persistent -y</code></pre>
+                <p>Answer "yes" to saving both IPv4 and IPv6 rules when prompted. To re-save later after any rule
+                    changes:</p>
+                <pre><code>sudo netfilter-persistent save</code></pre>
+
+                <h2>Step 13: End-to-end test</h2>
+                <p>Use the official Ubuntu ISO torrent — well-seeded, legal, uses HTTPS trackers:</p>
+                <pre><code>wget https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso.torrent -O /tmp/ubuntu.torrent
+transmission-remote --auth "$TR_AUTH" -a /tmp/ubuntu.torrent
+sleep 30
+transmission-remote --auth "$TR_AUTH" -t 1 -i</code></pre>
+                <p>Expected within a minute: <code>State: Downloading</code>, non-zero download speed,
+                    <code>Peers: connected to &lt;N&gt;</code> with N &gt; 0.</p>
+                <p>Confirm the traffic is genuinely using the tunnel:</p>
+                <pre><code>sudo ss -tn state established | grep &lt;TUNNEL_IPV4&gt;</code></pre>
+                <p>Expected: established connections with <code>&lt;TUNNEL_IPV4&gt;</code> as the local address.
+                    (Note: <code>ss -tnp</code> with process matching may show nothing due to the daemon's systemd
+                    sandboxing — filter by IP instead, as shown.)</p>
+                <p>Confirm the kill switch counters are live:</p>
+                <pre><code>sudo iptables -L OUTPUT -v -n</code></pre>
+                <p>The <code>mullvad</code> ACCEPT rule's packet counter should be climbing during the download.</p>
+
+                <h2>Step 14: The definitive kill switch test</h2>
+                <p>Prove traffic fails closed when the tunnel drops:</p>
+                <pre><code>sudo wg-quick down mullvad
+sleep 5
+sudo ss -tn state established | grep &lt;TUNNEL_IPV4&gt;    # should show nothing
+sudo wg-quick up mullvad                               # restore</code></pre>
+                <p>With the tunnel down, Transmission must show zero peer connections and zero transfer — never
+                    activity on your real IP.</p>
+
+                <hr>
+
+                <h2>Ongoing maintenance</h2>
+
+                <h3>If you ever change Mullvad servers</h3>
+                <p>The tunnel IPs change with every new config. You MUST update, in this order:</p>
+                <ol>
+                    <li><code>/etc/wireguard/mullvad.conf</code> — new <code>Address</code>, <code>PublicKey</code>,
+                        <code>Endpoint</code>, and the IPs inside <code>PostUp</code>/<code>PostDown</code></li>
+                    <li><code>/etc/transmission-daemon/settings.json</code> — <code>bind-address-ipv4</code> and
+                        <code>bind-address-ipv6</code> (stop the daemon fully first, per Step 8)</li>
+                    <li>Restart both: <code>sudo wg-quick down mullvad &amp;&amp; sudo wg-quick up mullvad</code>,
+                        then <code>sudo systemctl restart transmission-daemon</code></li>
+                </ol>
+                <p>The kill switch rules reference the interface name (<code>mullvad</code>), not IPs, so they never
+                    need updating.</p>
+
+                <h3>Quick health check (run any time)</h3>
+                <pre><code>sudo wg show                                          # recent handshake?
+curl --interface &lt;TUNNEL_IPV4&gt; https://am.i.mullvad.net/json   # mullvad_exit_ip: true?
+sudo ss -tlnp | grep transmission                     # bound to tunnel IPs?
+ip rule show &amp;&amp; ip route show table 200               # policy routing intact?</code></pre>
+
+                <h3>Known limitations</h3>
+                <ul>
+                    <li><strong>No inbound port forwarding</strong> — Mullvad discontinued it. Seeding works via
+                        DHT/PEX-discovered and outbound-initiated connections only.</li>
+                    <li><strong>Some UDP trackers may be unreachable through the tunnel</strong> depending on your
+                        network path, even when HTTPS trackers and DHT work perfectly. DHT/PEX peer discovery is
+                        unaffected and is sufficient for well-seeded public torrents.</li>
+                    <li><strong>Tracker errors on individual trackers are normal</strong> — public torrents often
+                        list many trackers, several of which are dead or unreliable at any given time. As long as
+                        the torrent finds peers (via any tracker, DHT, or PEX), individual tracker errors are
+                        cosmetic.</li>
+                </ul>
+            </article>
+        </div>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link active" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>
