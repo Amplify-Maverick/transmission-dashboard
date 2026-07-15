@@ -17,6 +17,10 @@ from unittest.mock import patch
 
 os.environ.setdefault("USE_MOCK", "true")
 os.environ.setdefault("FLASK_SECRET_KEY", "test-secret")
+# The verdict tests exercise a *configured* indicator, so pin an interface name
+# before config is imported. The unset case (indicator disabled) is covered
+# explicitly by test_empty_iface_is_disabled_not_down.
+os.environ.setdefault("TUNNEL_IFACE", "wg-test")
 
 import app  # noqa: E402
 import config  # noqa: E402
@@ -106,6 +110,7 @@ class TunnelCheckTests(unittest.TestCase):
         self._patch_bind("0.0.0.0").start()
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "down")
+        self.assertEqual(r["reason"], "iface_missing")
         self.assertIn("not found", r["error"])
 
     def test_interface_present_no_handshake(self):
@@ -135,6 +140,7 @@ class TunnelCheckTests(unittest.TestCase):
         self._patch_bind("10.99.0.5").start()
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "up", msg=r.get("error"))
+        self.assertEqual(r["reason"], "ok")
         self.assertEqual(r["interface_address"], "10.99.0.5")
         self.assertTrue(r["transmission_bound"])
 
@@ -149,6 +155,7 @@ class TunnelCheckTests(unittest.TestCase):
         self._patch_bind("0.0.0.0").start()
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "down")
+        self.assertEqual(r["reason"], "not_bound")
         self.assertIn("transmission bound", r["error"])
 
     def test_tunnel_ip_changed_does_not_break_check(self):
@@ -163,6 +170,19 @@ class TunnelCheckTests(unittest.TestCase):
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "up", msg=r.get("error"))
         self.assertEqual(r["interface_address"], new_ip)
+
+    def test_empty_iface_is_disabled_not_down(self):
+        """An unset TUNNEL_IFACE means the operator didn't opt into the tunnel
+        indicator. It must report 'disabled' (UI hides it), never a false 'down'
+        — and must not probe wg/psutil with an empty interface name."""
+        with patch.object(config, "TUNNEL_IFACE", ""), \
+             patch("app._wg_show_dump") as m_dump, \
+             patch("app.psutil.net_if_stats") as m_stats:
+            r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "disabled")
+        self.assertEqual(r["reason"], "not_configured")
+        m_dump.assert_not_called()
+        m_stats.assert_not_called()
 
     def test_wg_binary_missing_is_error_not_down(self):
         patch.stopall()  # drop the default _wg_show_dump fake

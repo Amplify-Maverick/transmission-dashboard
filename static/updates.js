@@ -35,7 +35,20 @@
         }
         const behind = Number(data.behind) || 0;
         if (behind <= 0) {
-            hide();
+            // Up to date — show a calm green dot + label rather than hiding, so
+            // the indicator always confirms the checkout's state at a glance.
+            // When the last check was offline we can't be sure, so fall back to
+            // the yellow "stale" treatment with a caveat instead of green.
+            label.textContent = 'Up to date';
+            if (data.stale) {
+                badge.dataset.state = 'stale';
+                badge.title = 'Up to date as of the last check '
+                    + '(offline — could be out of date)';
+            } else {
+                badge.dataset.state = 'uptodate';
+                badge.title = 'Dashboard is up to date with upstream';
+            }
+            badge.hidden = false;
             return;
         }
         label.textContent = behind === 1 ? '1 update' : `${behind} updates`;

@@ -2240,10 +2240,16 @@ def _do_tunnel_check():
     iface = config.TUNNEL_IFACE
     result = {
         "status": "error",
+        "reason": None,
         "interface": iface,
+        "interface_exists": None,
+        "interface_up": None,
         "interface_address": None,
         "last_handshake_seconds": None,
         "stale_after_seconds": config.WG_HANDSHAKE_STALE_SEC,
+        "endpoint": None,
+        "rx_bytes": None,
+        "tx_bytes": None,
         "transmission_bound": None,
         "transmission_bind_address": None,
         "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -2251,54 +2257,87 @@ def _do_tunnel_check():
         "cached": False,
     }
 
+    if not iface:
+        # No interface configured. Per config.py this means the operator hasn't
+        # opted into the tunnel indicator — surface a distinct "disabled" state
+        # so the UI hides the indicator, rather than probing an empty iface name
+        # (which `wg`/psutil report as missing → a bogus red "down").
+        result["status"] = "disabled"
+        result["reason"] = "not_configured"
+        return result
+
     dump = _wg_show_dump(iface)
     if dump is None:
+        result["reason"] = "wg_missing"
         result["error"] = "wg binary not available"
         return result
 
     try:
         info = _tunnel_status(iface, dump=dump)
     except Exception as e:
+        result["reason"] = "iface_lookup_failed"
         result["error"] = f"interface lookup failed: {e}"
         return result
 
-    result["interface_address"] = info.get("interface_address")
+    # Collect every live signal up front — including transmission's bind —
+    # so the payload/tooltip shows the full picture no matter which check
+    # ends up tripping the verdict below. (The old code early-returned at
+    # the first failure and threw away the rest, e.g. an "interface down"
+    # verdict hid the handshake age and bind address entirely.)
+    tunnel_addr = info.get("interface_address")
+    bound, bind_addr = _transmission_bind_check(tunnel_addr)
+    result["interface_exists"] = info.get("interface_exists")
+    result["interface_up"] = info.get("interface_up")
+    result["interface_address"] = tunnel_addr
     result["last_handshake_seconds"] = info.get("last_handshake_seconds")
+    result["endpoint"] = info.get("endpoint")
+    result["rx_bytes"] = info.get("rx_bytes")
+    result["tx_bytes"] = info.get("tx_bytes")
+    result["transmission_bound"] = bound
+    result["transmission_bind_address"] = bind_addr
 
+    # Verdict, most-fundamental failure first. `reason` is a stable machine
+    # code (unlike the free-text `error`) so the UI and history can key off it.
     if not info.get("interface_exists"):
         result["status"] = "down"
+        result["reason"] = "iface_missing"
         result["error"] = f"interface {iface} not found"
         return result
     if not info.get("interface_up"):
         result["status"] = "down"
+        result["reason"] = "iface_down"
         result["error"] = f"interface {iface} is down"
         return result
-    tunnel_addr = info.get("interface_address")
     if not tunnel_addr:
         result["status"] = "down"
+        result["reason"] = "no_ipv4"
         result["error"] = f"interface {iface} has no IPv4 address"
         return result
     hs = info.get("last_handshake_seconds")
     if hs is None:
         result["status"] = "down"
+        result["reason"] = "no_handshake"
         result["error"] = "no peer handshake recorded"
         return result
     if hs > config.WG_HANDSHAKE_STALE_SEC:
         result["status"] = "down"
+        result["reason"] = "stale_handshake"
         result["error"] = (
             f"last handshake {hs}s ago "
             f"(threshold {config.WG_HANDSHAKE_STALE_SEC}s)"
         )
         return result
 
-    bound, bind_addr = _transmission_bind_check(tunnel_addr)
-    result["transmission_bound"] = bound
-    result["transmission_bind_address"] = bind_addr
     if bound is None:
+        # Interface healthy but the bind setting is unreadable — we can't
+        # confirm traffic is pinned to the tunnel, so it's error (can't tell),
+        # not down.
+        result["reason"] = "bind_unreadable"
         result["error"] = "could not read transmission bind-address"
         return result
     if not bound:
         result["status"] = "down"
+        result["reason"] = "not_bound"
         result["error"] = (
             f"transmission bound to {bind_addr or '0.0.0.0'} — "
             f"not the tunnel IP {tunnel_addr}"
@@ -2306,6 +2345,7 @@ def _do_tunnel_check():
         return result
 
     result["status"] = "up"
+    result["reason"] = "ok"
     return result
 
 

@@ -5,6 +5,14 @@
     const label = indicator.querySelector('.tunnel-label');
     const POLL_MS = 15000;
 
+    function fmtBytes(n) {
+        if (n == null || Number.isNaN(n)) return null;
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let v = n, i = 0;
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+    }
+
     function fmtAgo(iso) {
         if (!iso) return null;
         const ts = Date.parse(iso);
@@ -18,6 +26,15 @@
     }
 
     function apply(data) {
+        // No interface configured server-side → the indicator is opt-in, so
+        // hide it entirely rather than showing a state the operator never asked
+        // for. (Polling continues cheaply; the server short-circuits.)
+        if (data && data.status === 'disabled') {
+            indicator.style.display = 'none';
+            stop();  // config is static; no point polling a disabled indicator
+            return;
+        }
+        indicator.style.display = '';
         if (!data || data.ok === false) {
             indicator.dataset.state = 'unknown';
             dot.dataset.state = 'unknown';
@@ -53,11 +70,24 @@
                 : `${data.interface}`;
             lines.push(ifaceLine);
         }
+        if (data.endpoint) {
+            lines.push(`Endpoint: ${data.endpoint}`);
+        }
         if (data.last_handshake_seconds != null) {
-            lines.push(`Last handshake: ${data.last_handshake_seconds}s ago`);
+            const stale = data.stale_after_seconds != null
+                && data.last_handshake_seconds > data.stale_after_seconds;
+            lines.push(`Last handshake: ${data.last_handshake_seconds}s ago`
+                + (stale ? ` (stale > ${data.stale_after_seconds}s)` : ''));
+        }
+        const rx = fmtBytes(data.rx_bytes);
+        const tx = fmtBytes(data.tx_bytes);
+        if (rx || tx) {
+            lines.push(`Transfer: ↓ ${rx || '0 B'}  ↑ ${tx || '0 B'}`);
         }
         if (data.transmission_bind_address) {
-            lines.push(`Transmission bind: ${data.transmission_bind_address}`);
+            const mismatch = data.transmission_bound === false;
+            lines.push(`Transmission bind: ${data.transmission_bind_address}`
+                + (mismatch ? ' (not the tunnel IP)' : ''));
         }
         const ago = fmtAgo(data.checked_at);
         if (ago) lines.push(`Checked ${ago}${data.cached ? ' (cached)' : ''}`);

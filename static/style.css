@@ -198,6 +198,15 @@ body {
     animation: pulse-yellow 1.6s infinite;
 }
 
+/* Up to date: a steady (non-pulsing) green dot — reassuring, not attention-
+   grabbing like the blue "update available" pulse. */
+.update-badge[data-state="uptodate"] { color: var(--muted); }
+.update-badge[data-state="uptodate"] .update-dot {
+    background: var(--green);
+    box-shadow: none;
+    animation: none;
+}
+
 .update-badge:hover .update-label { color: var(--text-strong); }
 
 @keyframes pulse-blue {
@@ -3391,7 +3400,12 @@ body.select-mode-right .torrent-list {
        (The 820px shell only made it scroll horizontally.) */
     .primary-nav { display: none; }
     .logout-link { display: none; }
+    /* Hide the label when the tunnel is healthy/unknown to stay compact, but
+       reveal it on trouble states — mobile has no hover to read the tooltip. */
     .tunnel-label { display: none; }
+    .tunnel[data-state="down"] .tunnel-label,
+    .tunnel[data-state="warn"] .tunnel-label,
+    .tunnel[data-state="error"] .tunnel-label { display: inline; }
     .update-label { display: none; }
 
     /* Filter tabs share one wrapping row; the storage meters (Disk /
