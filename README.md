@@ -105,6 +105,58 @@ and restarts the systemd service if the unit is installed (otherwise it tells
 you to restart manually). Your config, database and runtime state are all
 gitignored, so a pull **never** clobbers them.
 
+This is the recommended workflow for anyone running a clone: the server pulls
+published commits straight from GitHub.
+
+---
+
+## Deploying from a separate dev box (optional)
+
+`update.sh` above is all most people need. `deploy.sh` covers a different
+workflow: you **edit the code on one machine (a laptop/dev box) and run the app
+on another (a server/VPS)**, and you want to ship your working tree directly
+over SSH instead of committing and pushing through GitHub first.
+
+Use `deploy.sh` if:
+
+- You develop locally and test on a separate always-on box, **and**
+- You want to push *uncommitted* work to that box quickly, without a
+  round-trip through GitHub.
+
+Stick with `update.sh` (and skip `deploy.sh` entirely) if:
+
+- You develop and run on the **same** machine, **or**
+- Your server pulls from GitHub — i.e. you commit, push, then run `./update.sh`
+  on the server. This is simpler and keeps the server's history clean.
+
+### Setup
+
+`deploy.sh` is gitignored because it holds your personal server address. A
+template ships as `deploy.sh.example`:
+
+```bash
+cp deploy.sh.example deploy.sh
+chmod +x deploy.sh
+$EDITOR deploy.sh          # set VPS_HOST and REMOTE_DIR
+```
+
+Set up key-based SSH to the server first so it runs non-interactively
+(`ssh-copy-id user@your-server`), then from your dev box:
+
+```bash
+./deploy.sh
+```
+
+It `rsync`s the repo to the server — **excluding** `.env`, `.flask_secret`, the
+database, and all runtime state, so it never overwrites the server's config or
+data — then reinstalls dependencies and restarts the service remotely. The
+template also includes an optional VPN pre-check you can delete if you don't
+want it.
+
+Because it copies your working tree directly (not git commits), the server's
+checkout can drift from GitHub. If you rely on the update badge, remember it
+compares the server against `origin/main`, so commit and push periodically too.
+
 ---
 
 ## Tunnel setup
