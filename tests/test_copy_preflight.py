@@ -116,6 +116,27 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(data["margin_fraction"], 0.0)
         self.assertEqual(data["chosen_path"], "/mnt/internal/movies")
 
+    def test_per_folder_margin_overrides_global(self):
+        # Global 5%, but the internal drive carries a 30% override: with
+        # 20% free it must be rejected while the external drive (global 5%)
+        # takes the copy. Each disk reports its own margin_fraction.
+        cfg = dict(CFG, space_margin_percent=5)
+        cfg["folders"] = [
+            {"name": "Movies", "path": "/mnt/internal/movies",
+             "space_margin_percent": 30},
+            {"name": "Movies", "path": "/mnt/external/movies"},
+        ]
+        free = int(TB * 0.20)
+        res = self._get(cfg=cfg, df_by_path={
+            "/mnt/internal/movies": (TB, TB - free, free),
+            "/mnt/external/movies": (TB, 0, TB),
+        })
+        data = res.get_json()
+        self.assertEqual(
+            [d["margin_fraction"] for d in data["disks"]], [0.30, 0.05]
+        )
+        self.assertEqual(data["chosen_path"], "/mnt/external/movies")
+
     def test_no_disk_fits(self):
         res = self._get(df_by_path={
             "/mnt/internal/movies": (TB, TB, 0),

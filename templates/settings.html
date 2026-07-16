@@ -99,9 +99,38 @@
                     <div class="settings-field">
                         <label class="field-label" for="media-margin-input">Free space margin (%)</label>
                         <input type="number" id="media-margin-input" placeholder="8" min="0" max="50">
-                        <p class="field-hint">Copies must leave this much of each destination disk free (0&ndash;50). 0 allows filling a disk completely.</p>
+                        <p class="field-hint">Copies must leave this much of each destination disk free (0&ndash;50). 0 allows filling a disk completely. Folder rows below can override this per drive.</p>
                     </div>
                 </div>
+
+                <details class="field-details">
+                    <summary>How to choose a free space margin</summary>
+                    <div class="field-details-body">
+                        <p>
+                            The margin is a percent of each disk's <strong>total</strong> size that copies must leave free
+                            (8% of a 1&nbsp;TB disk keeps ~80&nbsp;GB in reserve). It absorbs source-size estimation error
+                            and stops a copy from filling a disk outright. Rules of thumb:
+                        </p>
+                        <ul>
+                            <li>
+                                <strong>Disk that also runs the OS or media server app</strong> (e.g. the server's root
+                                filesystem): keep <strong>8&ndash;10%</strong>. The app's database, metadata and logs live
+                                there — if it fills up, the media server itself starts failing, not just copies.
+                            </li>
+                            <li>
+                                <strong>Dedicated media-only disk:</strong> <strong>5%</strong> is plenty. Media files are
+                                written once and read many times, so SSD wear and near-full write slowdown matter little.
+                            </li>
+                            <li>
+                                <strong>0%</strong> disables the buffer — a copy may fill the disk to the last byte.
+                            </li>
+                        </ul>
+                        <p>
+                            In a fallback group each drive is judged against its own margin, so a stricter margin on one
+                            drive simply sends copies to the next one sooner.
+                        </p>
+                    </div>
+                </details>
 
                 <div class="settings-field settings-field-wide">
                     <label class="field-label">Destination folders</label>
@@ -110,6 +139,7 @@
                         Reusing a label across rows makes them a fallback group — copies land on the first row with enough free space.
                         The optional <strong>Plex section</strong> column is the numeric ID of the library to refresh after a copy
                         (only used when library refresh is set to Plex below).
+                        The optional <strong>margin</strong> column overrides the free space margin for that drive; blank uses the global value.
                     </p>
                     <div class="media-folders" id="media-folders"></div>
                     <div>
@@ -361,18 +391,20 @@
         const mediaSaveBtn = document.getElementById('media-save-btn');
         const mediaTestBtn = document.getElementById('media-test-btn');
 
-        function buildFolderRow(name = '', path = '', plexSectionId = '') {
+        function buildFolderRow(name = '', path = '', plexSectionId = '', marginPercent = '') {
             const row = document.createElement('div');
             row.className = 'media-folder-row';
             row.innerHTML = `
                 <input type="text" class="media-folder-name" placeholder="Movies" autocomplete="off" spellcheck="false">
                 <input type="text" class="media-folder-path" placeholder="/mnt/media/movies" autocomplete="off" spellcheck="false">
                 <input type="text" class="media-folder-plex" placeholder="Plex §" autocomplete="off" spellcheck="false" inputmode="numeric" title="Plex section ID (number)">
+                <input type="text" class="media-folder-margin" placeholder="margin %" autocomplete="off" spellcheck="false" inputmode="numeric" title="Free space margin override for this drive (0-50%); blank uses the global value">
                 <button type="button" class="btn btn-sm media-folder-remove" aria-label="Remove folder">&times;</button>
             `;
             row.querySelector('.media-folder-name').value = name;
             row.querySelector('.media-folder-path').value = path;
             row.querySelector('.media-folder-plex').value = plexSectionId;
+            row.querySelector('.media-folder-margin').value = marginPercent;
             row.querySelector('.media-folder-remove').addEventListener('click', () => {
                 row.remove();
                 if (!mediaFoldersEl.querySelector('.media-folder-row')) {
@@ -391,7 +423,9 @@
                 return;
             }
             folders.forEach(f => mediaFoldersEl.appendChild(buildFolderRow(
-                f.name || '', f.path || '', f.plex_section_id || ''
+                f.name || '', f.path || '', f.plex_section_id || '',
+                // 0 is a valid override — only blank when the key is absent.
+                f.space_margin_percent ?? ''
             )));
         }
 
@@ -402,9 +436,11 @@
                 const name = row.querySelector('.media-folder-name').value.trim();
                 const path = row.querySelector('.media-folder-path').value.trim();
                 const plexSectionId = row.querySelector('.media-folder-plex').value.trim();
+                const marginPercent = row.querySelector('.media-folder-margin').value.trim();
                 if (name || path) {
                     const entry = { name, path };
                     if (plexSectionId) entry.plex_section_id = plexSectionId;
+                    if (marginPercent !== '') entry.space_margin_percent = marginPercent;
                     out.push(entry);
                 }
             });
@@ -539,6 +575,12 @@
                 }
                 if (f.plex_section_id && !/^\d+$/.test(f.plex_section_id)) {
                     showMediaError(`Folder '${f.name}' Plex section must be a number.`);
+                    return;
+                }
+                if (f.space_margin_percent !== undefined
+                        && (!/^\d+$/.test(f.space_margin_percent)
+                            || parseInt(f.space_margin_percent, 10) > 50)) {
+                    showMediaError(`Folder '${f.name}' margin must be a whole number between 0 and 50 (%).`);
                     return;
                 }
                 if (seenPaths.has(f.path)) {

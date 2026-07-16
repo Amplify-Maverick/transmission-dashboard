@@ -2638,7 +2638,7 @@ body.select-mode-right .torrent-list {
 
 .media-folder-row {
     display: grid;
-    grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) 90px auto;
+    grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) 90px 90px auto;
     gap: 8px;
     align-items: center;
 }
@@ -2647,7 +2647,8 @@ body.select-mode-right .torrent-list {
     width: 100%;
 }
 
-.media-folder-row .media-folder-plex {
+.media-folder-row .media-folder-plex,
+.media-folder-row .media-folder-margin {
     text-align: center;
 }
 
@@ -2658,12 +2659,56 @@ body.select-mode-right .torrent-list {
 
 @media (max-width: 640px) {
     .media-folder-row {
-        grid-template-columns: 1fr 90px auto;
+        grid-template-columns: 1fr 1fr auto;
     }
     .media-folder-row .media-folder-name,
     .media-folder-row .media-folder-path {
         grid-column: 1 / -1;
     }
+}
+
+/* Collapsible guidance block (e.g. "How to choose a free space margin") */
+.field-details {
+    margin: 2px 0 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+}
+
+.field-details summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--muted);
+    user-select: none;
+}
+
+.field-details summary:hover {
+    color: var(--text);
+}
+
+.field-details-body {
+    padding: 0 12px 10px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--muted);
+}
+
+.field-details-body p {
+    margin: 6px 0;
+}
+
+.field-details-body ul {
+    margin: 6px 0;
+    padding-left: 20px;
+}
+
+.field-details-body li {
+    margin: 4px 0;
+}
+
+.field-details-body strong {
+    color: var(--text);
 }
 
 #copy-folder {

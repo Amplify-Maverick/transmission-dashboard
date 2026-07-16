@@ -2657,18 +2657,26 @@
                     badgeText = 'full';
                     badgeClass = 'copy-drive-badge-err';
                 }
-                const detail = d.free != null
+                const marginPct = d.margin_fraction != null
+                    ? Math.round(d.margin_fraction * 100) : null;
+                let detail = d.free != null
                     ? `${formatSize(d.free)} free of ${formatSize(d.total)}`
                     : '';
+                if (detail && marginPct != null) {
+                    detail += ` · keeps ${marginPct}%`;
+                }
                 copyDrivesEl.appendChild(
                     copyDriveRow(d.path, detail, badgeText, badgeClass));
             });
             if (data.need > 0) {
                 const note = document.createElement('div');
                 note.className = 'copy-drive-note';
+                const margins = new Set(data.disks.map(d => d.margin_fraction));
+                const headroom = margins.size === 1
+                    ? ` (drives keep ${Math.round((data.disks[0].margin_fraction || 0) * 100)}% headroom)`
+                    : '';
                 note.textContent = data.chosen_path
-                    ? `~${formatSize(data.need)} to copy (drives keep `
-                      + `${Math.round((data.margin_fraction || 0) * 100)}% headroom)`
+                    ? `~${formatSize(data.need)} to copy${headroom}`
                     : `Not enough space on any drive for ~${formatSize(data.need)}.`;
                 if (!data.chosen_path) note.classList.add('copy-drive-note-err');
                 copyDrivesEl.appendChild(note);

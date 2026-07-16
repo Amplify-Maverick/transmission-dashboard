@@ -407,21 +407,25 @@ def _remote_df(user, host, port, path):
 DEFAULT_SPACE_MARGIN_PERCENT = 8
 
 
-def _space_margin_fraction(cfg):
+def _space_margin_fraction(cfg, folder=None):
     """The configured free-space margin as a fraction of disk size.
 
-    Reads `space_margin_percent` from the media config dict; falls back to
-    the default on missing/malformed/out-of-range values so a hand-edited
-    config file can't silently disable the margin.
+    A folder-level `space_margin_percent` (the per-drive override column in
+    Settings) wins over the config-wide value. Missing/malformed/
+    out-of-range values fall through to the next level and ultimately the
+    default, so a hand-edited config file can't silently disable the margin.
     """
-    try:
-        pct = int((cfg or {}).get("space_margin_percent",
-                                  DEFAULT_SPACE_MARGIN_PERCENT))
-    except (TypeError, ValueError):
-        pct = DEFAULT_SPACE_MARGIN_PERCENT
-    if not 0 <= pct <= 50:
-        pct = DEFAULT_SPACE_MARGIN_PERCENT
-    return pct / 100.0
+    for scope in (folder, cfg):
+        raw = (scope or {}).get("space_margin_percent")
+        if raw is None:
+            continue
+        try:
+            pct = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= pct <= 50:
+            return pct / 100.0
+    return DEFAULT_SPACE_MARGIN_PERCENT / 100.0
 
 
 def _space_shortfall(need, total, available, margin_fraction):
@@ -757,10 +761,6 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         bwlimit_kbps = 0
     bwlimit_args = [f"--bwlimit={bwlimit_kbps}"] if bwlimit_kbps > 0 else []
 
-    # Free-space margin from media config (Settings), shared by the disk
-    # selection below and both preflight checks.
-    margin_fraction = _space_margin_fraction(cfg)
-
     # ---- Multi-disk fallback selection ----
     # `candidates` is the ordered list of same-name folders configured for
     # this destination label. When more than one exists we df each and pick
@@ -793,21 +793,24 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
             except RuntimeError as e:
                 tried.append({"path": cand["path"], "free": None, "error": str(e)})
                 continue
-            tried.append({"path": cand["path"], "free": free})
+            cand_margin = _space_margin_fraction(cfg, cand)
+            tried.append({"path": cand["path"], "free": free,
+                          "margin_percent": round(cand_margin * 100)})
             if _space_shortfall(preflight_bytes, disk_total, free,
-                                margin_fraction) == 0:
+                                cand_margin) == 0:
                 picked = cand
                 break
         if picked is None:
             reachable = [t for t in tried if t.get("free") is not None]
             if reachable:
                 summary = "; ".join(
-                    f"{t['path']}={t['free']}" for t in reachable
+                    f"{t['path']}={t['free']} (margin {t['margin_percent']}%)"
+                    for t in reachable
                 )
                 msg = (
                     f"Not enough space on any '{folder.get('name') if folder else ''}' "
                     f"destination — need {preflight_bytes} bytes plus "
-                    f"{margin_fraction:.0%} margin; tried {summary}"
+                    f"each drive's margin; tried {summary}"
                 )
                 db.log_event(
                     "copy.space_insufficient",
@@ -836,6 +839,10 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
             )
         folder = picked
         dest_root = picked["path"]
+
+    # Free-space margin of the destination drive (folder-level override,
+    # else the config-wide value) — used by both preflight checks below.
+    margin_fraction = _space_margin_fraction(cfg, folder)
 
     if media_type == "show" and season_groups:
         # Multi-season: each detected season copies into its own
@@ -3213,6 +3220,23 @@ def api_media_config_set():
                     f"folder '{name}' plex_section_id must be a number",
                     400,
                 )
+        # Optional per-drive free-space margin override; blank/absent means
+        # the config-wide space_margin_percent applies.
+        folder_margin = None
+        margin_raw_f = f.get("space_margin_percent")
+        if margin_raw_f is not None and str(margin_raw_f).strip() != "":
+            try:
+                folder_margin = int(str(margin_raw_f).strip())
+            except (TypeError, ValueError):
+                return _err(
+                    f"folder '{name}' margin must be an integer (percent)",
+                    400,
+                )
+            if not 0 <= folder_margin <= 50:
+                return _err(
+                    f"folder '{name}' margin must be between 0 and 50",
+                    400,
+                )
         if not name:
             return _err(f"folder #{i+1} is missing a name", 400)
         if not path:
@@ -3228,6 +3252,8 @@ def api_media_config_set():
         entry = {"name": name, "path": path}
         if section_id:
             entry["plex_section_id"] = section_id
+        if folder_margin is not None:
+            entry["space_margin_percent"] = folder_margin
         folders.append(entry)
 
     lib_raw = data.get("library_refresh") or {}
@@ -3561,17 +3587,18 @@ def api_copy_preflight(tid):
     user = cfg["user"]
     host = cfg["host"]
     port = int(cfg.get("port") or 22)
-    margin_fraction = _space_margin_fraction(cfg)
     disks = []
     for cand in candidates:
+        cand_margin = _space_margin_fraction(cfg, cand)
         entry = {"path": cand["path"], "total": None, "free": None,
-                 "fits": None, "error": None}
+                 "fits": None, "error": None,
+                 "margin_fraction": cand_margin}
         try:
             disk_total, _, free = _remote_df(user, host, port, cand["path"])
             entry["total"] = disk_total
             entry["free"] = free
             entry["fits"] = _space_shortfall(need, disk_total, free,
-                                             margin_fraction) == 0
+                                             cand_margin) == 0
         except RuntimeError as e:
             entry["error"] = str(e)
         disks.append(entry)
@@ -3597,7 +3624,8 @@ def api_copy_preflight(tid):
     return jsonify({
         "ok": True,
         "need": need,
-        "margin_fraction": margin_fraction,
+        # Config-wide value; per-drive overrides ride on each disks[] entry.
+        "margin_fraction": _space_margin_fraction(cfg),
         "disks": disks,
         "chosen_path": chosen,
     })
