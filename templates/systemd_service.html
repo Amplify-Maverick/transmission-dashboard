@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Running as a systemd service — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link active">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <main class="guide-page">
+        <div class="guide-container">
+            <a href="{{ url_for('settings') }}" class="guide-back">&lsaquo; Back to Settings</a>
+
+            <article class="guide-article">
+                <h1>Running the Dashboard as a systemd Service</h1>
+
+                <p>
+                    Setup guide for running the dashboard under gunicorn + systemd so it starts on boot,
+                    restarts on failure, and logs to the journal. A ready-made unit template ships with the
+                    repo at <code>systemd/transmission-dashboard.service.example</code>.
+                </p>
+
+                <hr>
+
+                <h2>Prerequisites</h2>
+                <ul>
+                    <li>The repo checked out on the server (e.g. <code>/home/&lt;user&gt;/transmission-dashboard</code>)</li>
+                    <li>A configured <code>.env</code> in the repo root (copy <code>.env.example</code> and fill it in)</li>
+                    <li>Root/sudo access</li>
+                </ul>
+
+                <h2>Step 1: Create the virtualenv</h2>
+                <p>The unit expects a virtualenv at <code>&lt;repo&gt;/.venv</code> with the dependencies
+                    (including gunicorn) installed:</p>
+                <pre><code>cd /home/&lt;user&gt;/transmission-dashboard
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt</code></pre>
+
+                <h2>Step 2: Install the unit file</h2>
+                <pre><code>sudo cp systemd/transmission-dashboard.service.example \
+  /etc/systemd/system/transmission-dashboard.service
+sudoedit /etc/systemd/system/transmission-dashboard.service</code></pre>
+                <p>Replace every <code>CHANGE_ME</code>:</p>
+                <ul>
+                    <li><strong><code>User=</code> / <code>Group=</code></strong> — the account that owns the
+                        checkout. Do not run it as root; the dashboard needs no elevated privileges beyond
+                        what the unit already grants (see Step 4).</li>
+                    <li><strong><code>WorkingDirectory=</code></strong> — the absolute path of the repo.</li>
+                    <li><strong><code>EnvironmentFile=</code></strong> — the absolute path of the
+                        <code>.env</code> inside the repo.</li>
+                    <li><strong><code>ExecStart=</code></strong> — the same repo path in the gunicorn binary's
+                        path.</li>
+                </ul>
+
+                <h2>Step 3: Leave the worker settings alone</h2>
+                <p>The unit runs gunicorn with <strong>one worker and eight threads</strong>
+                    (<code>--workers 1 --threads 8</code>). This is intentional, not a placeholder to tune up:</p>
+                <ul>
+                    <li>This is a single-user dashboard — extra workers add no capacity.</li>
+                    <li>Scan/copy state lives in-process. With multiple workers, a
+                        <code>/api/scan/&lt;id&gt;/stop</code> request can land in a different worker than the
+                        one running the scan and return 404, because the cancel event lives in the other
+                        worker's memory. Custom names, copy state, and caches fragment the same way.</li>
+                    <li>There is deliberately no <code>--access-logfile</code>: the UI polls several endpoints
+                        per second, and logging every poll wrote a journald line each — constant CPU/I/O for
+                        zero diagnostic value. Errors still reach the journal via
+                        <code>--error-logfile -</code>.</li>
+                </ul>
+
+                <h2>Step 4: The WireGuard capability pre-step</h2>
+                <p>The unit contains this block:</p>
+                <pre><code>ExecStartPre=+/bin/sh -c '/sbin/setcap cap_net_admin+ep "$(command -v wg)" || true'
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN</code></pre>
+                <p>What it does and why it exists:</p>
+                <ul>
+                    <li>The tunnel indicator runs <code>wg show</code>, which makes a netlink call requiring
+                        <code>CAP_NET_ADMIN</code>. Without the capability, the check sees no handshake and
+                        the indicator always reports "Tunnel down" even when the tunnel is fine.</li>
+                    <li>The <code>setcap</code> re-applies on <strong>every</strong> start because an
+                        <code>apt upgrade</code> of wireguard-tools replaces the binary and strips its file
+                        capabilities — without the pre-step this silently regresses.</li>
+                    <li>The leading <code>+</code> runs the pre-step as root regardless of <code>User=</code>;
+                        <code>|| true</code> keeps the unit bootable if <code>wg</code> is missing.</li>
+                    <li>Only relevant if you use the tunnel indicator (<code>TUNNEL_IFACE</code> set in
+                        <code>.env</code>) — harmless otherwise; leave it in place either way.</li>
+                </ul>
+
+                <h2>Step 5: Enable and start</h2>
+                <pre><code>sudo systemctl daemon-reload
+sudo systemctl enable --now transmission-dashboard</code></pre>
+
+                <h2>Step 6: Verify</h2>
+                <pre><code>systemctl status transmission-dashboard
+sudo ss -tlnp | grep 5000</code></pre>
+                <p>Expected: <code>active (running)</code>, and gunicorn listening on
+                    <code>127.0.0.1:5000</code> (NOT <code>0.0.0.0</code> — the dashboard is meant to be
+                    reached via localhost, an SSH tunnel, or a reverse proxy you control).</p>
+                <p>Then open the dashboard in a browser and confirm you get the login page.</p>
+
+                <hr>
+
+                <h2>Ongoing maintenance</h2>
+
+                <h3>Logs</h3>
+                <pre><code>journalctl -u transmission-dashboard -f          # follow live
+journalctl -u transmission-dashboard --since -1h # recent history</code></pre>
+
+                <h3>Updating the dashboard</h3>
+                <p>Use the repo's update script — it pulls, reinstalls dependencies into
+                    <code>.venv</code>, and restarts the service:</p>
+                <pre><code>cd /home/&lt;user&gt;/transmission-dashboard
+./update.sh</code></pre>
+                <p>Or manually:</p>
+                <pre><code>git pull --ff-only
+.venv/bin/pip install -r requirements.txt
+sudo systemctl restart transmission-dashboard</code></pre>
+
+                <h3>After editing .env</h3>
+                <p>systemd reads <code>EnvironmentFile=</code> only at service start — a restart is required
+                    for changes to take effect:</p>
+                <pre><code>sudo systemctl restart transmission-dashboard</code></pre>
+
+                <h3>If the service won't start</h3>
+                <ul>
+                    <li><code>systemctl status transmission-dashboard</code> shows the last few log lines and
+                        the exit reason; <code>journalctl -u transmission-dashboard -e</code> shows the full
+                        traceback.</li>
+                    <li><strong>Missing <code>.env</code></strong> — a nonexistent <code>EnvironmentFile=</code>
+                        path fails the unit before gunicorn even runs. Prefix the path with <code>-</code>
+                        (<code>EnvironmentFile=-/…/.env</code>) only if you intend it to be optional.</li>
+                    <li><strong><code>status=203/EXEC</code></strong> — the gunicorn path in
+                        <code>ExecStart=</code> is wrong or the virtualenv is missing; re-check Step 1 and the
+                        paths from Step 2.</li>
+                    <li><strong>Restart loop</strong> — the unit uses <code>Restart=on-failure</code> with a
+                        5-second delay, so a crashing app restarts forever; fix the underlying error from the
+                        journal rather than the unit.</li>
+                </ul>
+            </article>
+        </div>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link active" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+</body>
+</html>

@@ -1421,6 +1421,12 @@ def vpn_binding_guide():
     return render_template("vpn_binding.html")
 
 
+@app.route("/settings/systemd-service")
+@login_required
+def systemd_service_guide():
+    return render_template("systemd_service.html")
+
+
 @app.route("/system")
 @login_required
 def system():
