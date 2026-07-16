@@ -237,6 +237,39 @@ recent, **and** Transmission's `bind-address-ipv4` matches the interface's
 current IP — so it catches both a dropped tunnel and a leak out the bare link.
 `wg show` needs `CAP_NET_ADMIN`; the systemd unit grants it (see its comments).
 
+### Tunnel auto-recovery
+
+A WireGuard session can wedge permanently: the kernel retries handshakes from
+one fixed source port, so if the path dies underneath it (VPN relay reboot,
+stale NAT mapping) every retry lands in a black hole — the tunnel stays down
+indefinitely until someone bounces the interface, which picks a fresh port.
+
+Set `TUNNEL_RECOVERY_CMD` in `.env` to have the dashboard bounce it for you:
+
+```
+TUNNEL_RECOVERY_CMD=sudo -n wg-quick down mullvad; sudo -n wg-quick up mullvad
+```
+
+The watchdog only fires when the tunnel has been continuously down with a
+stale or missing handshake for `TUNNEL_RECOVERY_AFTER_SEC` (default 5 min) —
+reasons a bounce can't fix (Transmission unbound, interface deliberately
+removed with `wg-quick down`) never trigger it. It waits
+`TUNNEL_RECOVERY_COOLDOWN_SEC` (default 10 min) between attempts and gives up
+after `TUNNEL_RECOVERY_MAX_ATTEMPTS` (default 3) so an expired VPN account
+doesn't flap the interface all night. Every attempt is logged to the event
+history and shown in the tunnel indicator's tooltip.
+
+`wg-quick` needs root, and the dashboard runs unprivileged — grant just those
+two commands via sudoers (adjust user, path, and interface name):
+
+```
+# /etc/sudoers.d/transmission-dashboard-tunnel  (chmod 440, edit with visudo -f)
+user ALL=(root) NOPASSWD: /usr/bin/wg-quick down mullvad, /usr/bin/wg-quick up mullvad
+```
+
+The `-n` in the command makes sudo fail fast instead of hanging on a password
+prompt if the rule is missing.
+
 <!-- TODO (maintainer): document your specific VPN/WireGuard setup here —
      how you generate the WG config, how Transmission's bind-address-ipv4 is
      pinned to the tunnel IP, and any provider-specific notes (e.g. Mullvad).

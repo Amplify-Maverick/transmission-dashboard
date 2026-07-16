@@ -2379,8 +2379,150 @@ def api_tunnel_status():
     return jsonify({
         "ok": True,
         "cache_ttl_seconds": config.TUNNEL_CHECK_CACHE_TTL,
+        "recovery": _tunnel_recovery_state(),
         **data,
     })
+
+
+# ---------- tunnel auto-recovery watchdog ----------
+#
+# A WireGuard session can wedge permanently: the kernel retries handshakes
+# from one fixed source port, so if the path dies (relay reboot, stale NAT
+# mapping) every retry lands in a black hole and the tunnel never heals —
+# observed 2026-07-16 as 16.5h of "Tunnel down" that a `wg-quick down && up`
+# (fresh source port) fixed instantly. When TUNNEL_RECOVERY_CMD is set, this
+# watchdog runs it after the check has been continuously down with that
+# wedged-session signature. Guards, in order:
+#   - only reasons a bounce can plausibly fix (stale/missing handshake) —
+#     an operator's deliberate `wg-quick down` removes the interface, which
+#     reads as iface_missing and is left alone;
+#   - the outage must persist TUNNEL_RECOVERY_AFTER_SEC before the first try;
+#   - TUNNEL_RECOVERY_COOLDOWN_SEC between tries;
+#   - at most TUNNEL_RECOVERY_MAX_ATTEMPTS consecutive tries (a bounce can't
+#     fix an expired account — don't flap all night), reset when the tunnel
+#     comes back up.
+# The thread only starts when both TUNNEL_IFACE and TUNNEL_RECOVERY_CMD are
+# configured, so unconfigured installs (and the test suite) never spawn it.
+
+_RECOVERABLE_REASONS = {"stale_handshake", "no_handshake"}
+
+_tunnel_recovery_lock = threading.Lock()
+_tunnel_recovery = {
+    "down_since": None,        # monotonic; start of the current qualifying outage
+    "attempts": 0,             # consecutive attempts in this outage
+    "last_attempt_mono": None, # monotonic; cooldown reference
+    "last_attempt_at": None,   # ISO wall time, for the UI tooltip
+    "last_result": None,       # "ok" | "exit N" | "timeout" | "failed: ..."
+    "gave_up": False,          # attempts exhausted for this outage
+}
+
+
+def _tunnel_recovery_state():
+    """Snapshot for the /api/tunnel-status payload."""
+    with _tunnel_recovery_lock:
+        return {
+            "enabled": bool(config.TUNNEL_RECOVERY_CMD),
+            "attempts": _tunnel_recovery["attempts"],
+            "max_attempts": config.TUNNEL_RECOVERY_MAX_ATTEMPTS,
+            "last_attempt_at": _tunnel_recovery["last_attempt_at"],
+            "last_result": _tunnel_recovery["last_result"],
+            "gave_up": _tunnel_recovery["gave_up"],
+        }
+
+
+def _run_tunnel_recovery_cmd():
+    """Run the operator's bounce command. Returns a short result string."""
+    try:
+        proc = subprocess.run(
+            config.TUNNEL_RECOVERY_CMD,
+            shell=True, capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except Exception as e:
+        return f"failed: {e}"
+    if proc.returncode == 0:
+        return "ok"
+    tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return f"exit {proc.returncode}" + (f": {tail[-1][:200]}" if tail else "")
+
+
+def _tunnel_recovery_tick(now=None):
+    """One watchdog evaluation. Split from the worker loop for testability."""
+    now = time.monotonic() if now is None else now
+    check = _cached_tunnel_check()
+    st = _tunnel_recovery
+    with _tunnel_recovery_lock:
+        if check.get("status") == "up":
+            # Healthy again — close out the outage and restore the attempt
+            # budget for the next one.
+            st.update(down_since=None, attempts=0, gave_up=False)
+            return
+        if not (check.get("status") == "down"
+                and check.get("reason") in _RECOVERABLE_REASONS):
+            # Down for a reason a bounce can't fix (unbound transmission,
+            # deliberately-removed interface) or an error state — stand down,
+            # but keep the attempt counter: flipping reasons mustn't refill
+            # the budget mid-outage.
+            st["down_since"] = None
+            return
+        if st["down_since"] is None:
+            st["down_since"] = now
+        if now - st["down_since"] < config.TUNNEL_RECOVERY_AFTER_SEC:
+            return
+        if st["attempts"] >= config.TUNNEL_RECOVERY_MAX_ATTEMPTS:
+            if not st["gave_up"]:
+                st["gave_up"] = True
+                db.log_event(
+                    "tunnel.recovery", "error",
+                    f"Tunnel auto-recovery giving up after "
+                    f"{st['attempts']} attempts — manual intervention needed",
+                    details={"reason": check.get("reason")},
+                )
+            return
+        if (st["last_attempt_mono"] is not None
+                and now - st["last_attempt_mono"] < config.TUNNEL_RECOVERY_COOLDOWN_SEC):
+            return
+        st["attempts"] += 1
+        st["last_attempt_mono"] = now
+        st["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+        attempt = st["attempts"]
+
+    # Run the command outside the lock — it can take tens of seconds and
+    # /api/tunnel-status readers must not block behind it.
+    result = _run_tunnel_recovery_cmd()
+    with _tunnel_recovery_lock:
+        st["last_result"] = result
+    db.log_event(
+        "tunnel.recovery",
+        "info" if result == "ok" else "error",
+        f"Tunnel auto-recovery attempt {attempt}/"
+        f"{config.TUNNEL_RECOVERY_MAX_ATTEMPTS}: {result} "
+        f"(down: {check.get('reason')})",
+        details={"reason": check.get("reason"), "result": result},
+    )
+    # Refresh the cached verdict promptly so the UI (and the next tick)
+    # reflects the post-bounce state instead of a pre-bounce cache entry.
+    # A successful handshake can take a few seconds; give it a moment.
+    time.sleep(5)
+    _cached_tunnel_check(force=True)
+
+
+def _tunnel_recovery_worker():
+    # Tick at the check-cache cadence — _cached_tunnel_check() makes each
+    # tick nearly free when the UI is already polling.
+    interval = max(config.TUNNEL_CHECK_CACHE_TTL, 10.0)
+    while True:
+        time.sleep(interval)
+        try:
+            _tunnel_recovery_tick()
+        except Exception:
+            # Never let the watchdog die; next tick retries from scratch.
+            pass
+
+
+if config.TUNNEL_IFACE and config.TUNNEL_RECOVERY_CMD:
+    threading.Thread(target=_tunnel_recovery_worker, daemon=True).start()
 
 
 # ---------- update-available indicator ----------

@@ -32,6 +32,28 @@ WG_HANDSHAKE_STALE_SEC = int(os.getenv("WG_HANDSHAKE_STALE_SEC", "180"))
 # How long a tunnel-status result stays cached before a fresh probe runs.
 TUNNEL_CHECK_CACHE_TTL = float(os.getenv("TUNNEL_CHECK_CACHE_TTL", "30"))
 
+# Tunnel auto-recovery (opt-in). A WireGuard session can wedge: the kernel
+# keeps retrying handshakes from the same source port forever, and if the
+# path is dead (relay rebooted, NAT mapping went stale) it never recovers on
+# its own — the tunnel stays red until someone bounces it. When
+# TUNNEL_RECOVERY_CMD is set, a watchdog thread runs it after the indicator
+# has been continuously down with a wedged-session signature (stale or
+# missing handshake) for TUNNEL_RECOVERY_AFTER_SEC. The command typically
+# needs root, e.g. via a passwordless sudoers rule (see README):
+#   TUNNEL_RECOVERY_CMD=sudo -n wg-quick down mullvad; sudo -n wg-quick up mullvad
+# Empty (the default) disables the watchdog entirely.
+TUNNEL_RECOVERY_CMD = os.getenv("TUNNEL_RECOVERY_CMD", "").strip()
+# How long the tunnel must be continuously down before the first attempt.
+# Generous by default so a relay hiccup or brief ISP blip doesn't trigger a
+# needless bounce.
+TUNNEL_RECOVERY_AFTER_SEC = float(os.getenv("TUNNEL_RECOVERY_AFTER_SEC", "300"))
+# Minimum gap between attempts while the tunnel stays down.
+TUNNEL_RECOVERY_COOLDOWN_SEC = float(os.getenv("TUNNEL_RECOVERY_COOLDOWN_SEC", "600"))
+# Stop after this many consecutive failed attempts (a bounce can't fix an
+# expired VPN account — don't flap the interface all night). The counter
+# resets once the tunnel comes back up.
+TUNNEL_RECOVERY_MAX_ATTEMPTS = int(os.getenv("TUNNEL_RECOVERY_MAX_ATTEMPTS", "3"))
+
 # Mullvad VPN account number (16 digits). When set, the torrents page shows
 # a days-remaining countdown fetched from the Mullvad API.
 MULLVAD_ACCOUNT = os.getenv("MULLVAD_ACCOUNT")

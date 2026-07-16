@@ -89,6 +89,15 @@
             lines.push(`Transmission bind: ${data.transmission_bind_address}`
                 + (mismatch ? ' (not the tunnel IP)' : ''));
         }
+        const rec = data.recovery;
+        if (rec && rec.enabled && rec.last_attempt_at) {
+            const recAgo = fmtAgo(rec.last_attempt_at);
+            let recLine = `Auto-recovery: attempt ${rec.attempts}/${rec.max_attempts}`
+                + (recAgo ? ` ${recAgo}` : '')
+                + (rec.last_result ? ` — ${rec.last_result}` : '');
+            if (rec.gave_up) recLine += ' (gave up; manual fix needed)';
+            lines.push(recLine);
+        }
         const ago = fmtAgo(data.checked_at);
         if (ago) lines.push(`Checked ${ago}${data.cached ? ' (cached)' : ''}`);
         indicator.title = lines.join('\n');

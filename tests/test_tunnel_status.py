@@ -57,6 +57,12 @@ def _dump_with_handshake_age(seconds_ago):
 
 class TunnelCheckTests(unittest.TestCase):
     def setUp(self):
+        # Pin the interface at the config-module level. The env-var setdefault
+        # above only takes effect when this module is the first in the process
+        # to import config — under full-suite discovery, an earlier test module
+        # (e.g. test_copy_preflight) wins that race with TUNNEL_IFACE unset and
+        # every verdict here would collapse to "disabled".
+        patch.object(config, "TUNNEL_IFACE", "wg-test").start()
         self.iface = config.TUNNEL_IFACE
         # Default: wg dump succeeds with a fresh handshake. Tests that need
         # different behaviour patch over this one.
@@ -186,6 +192,8 @@ class TunnelCheckTests(unittest.TestCase):
 
     def test_wg_binary_missing_is_error_not_down(self):
         patch.stopall()  # drop the default _wg_show_dump fake
+        # stopall also dropped setUp's TUNNEL_IFACE pin — restore it.
+        patch.object(config, "TUNNEL_IFACE", self.iface).start()
         patch("app._wg_show_dump", return_value=None).start()
         for p in self._patch_iface():
             p.start()
