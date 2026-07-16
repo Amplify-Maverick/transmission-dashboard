@@ -96,6 +96,11 @@
                         <input type="number" id="media-bwlimit-input" placeholder="unlimited" min="0">
                         <p class="field-hint">Caps rsync so copies don't starve Transmission. Empty or 0 = unlimited.</p>
                     </div>
+                    <div class="settings-field">
+                        <label class="field-label" for="media-margin-input">Free space margin (%)</label>
+                        <input type="number" id="media-margin-input" placeholder="8" min="0" max="50">
+                        <p class="field-hint">Copies must leave this much of each destination disk free (0&ndash;50). 0 allows filling a disk completely.</p>
+                    </div>
                 </div>
 
                 <div class="settings-field settings-field-wide">
@@ -346,6 +351,7 @@
         const mediaHostEl = document.getElementById('media-host-input');
         const mediaPortEl = document.getElementById('media-port-input');
         const mediaBwlimitEl = document.getElementById('media-bwlimit-input');
+        const mediaMarginEl = document.getElementById('media-margin-input');
         const mediaFoldersEl = document.getElementById('media-folders');
         const mediaAddFolderBtn = document.getElementById('media-add-folder-btn');
         const mediaErrorEl = document.getElementById('media-error');
@@ -478,6 +484,9 @@
                 mediaHostEl.value = cfg.host || '';
                 mediaPortEl.value = cfg.port || 22;
                 mediaBwlimitEl.value = cfg.bwlimit_kbps || '';
+                // 0 is a valid margin — only fall back to blank (placeholder
+                // shows the default) when the key is absent.
+                mediaMarginEl.value = cfg.space_margin_percent ?? '';
                 renderFolders(cfg.folders);
                 applyLibraryConfig(cfg);
             } catch (err) {
@@ -497,11 +506,18 @@
                 showMediaError('Copy speed limit must be a non-negative number (KB/s).');
                 return;
             }
+            const marginRaw = mediaMarginEl.value.trim();
+            const margin = marginRaw === '' ? 8 : parseInt(marginRaw, 10);
+            if (Number.isNaN(margin) || margin < 0 || margin > 50) {
+                showMediaError('Free space margin must be a whole number between 0 and 50 (%).');
+                return;
+            }
             const body = {
                 user: mediaUserEl.value.trim(),
                 host: mediaHostEl.value.trim(),
                 port: parseInt(mediaPortEl.value, 10) || 22,
                 bwlimit_kbps: bwlimit,
+                space_margin_percent: margin,
                 folders,
                 library_refresh,
             };

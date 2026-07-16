@@ -82,15 +82,39 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual([d["fits"] for d in data["disks"]], [False, True])
 
     def test_margin_alone_rejects_primary(self):
-        # Primary has room for the bytes but would dip under the 8%
+        # Primary has room for the bytes but would dip under the default
         # reserve; the copy must go to the external drive.
-        margin = int(TB * app.SPACE_MARGIN_FRACTION)
+        margin = int(TB * app.DEFAULT_SPACE_MARGIN_PERCENT / 100)
         res = self._get(df_by_path={
             "/mnt/internal/movies": (TB, TB - margin + 1, margin - 1),
             "/mnt/external/movies": (TB, 0, TB),
         })
         data = res.get_json()
         self.assertEqual(data["chosen_path"], "/mnt/external/movies")
+
+    def test_configured_margin_overrides_default(self):
+        # 20% free but a configured 30% margin: primary must be rejected,
+        # and the endpoint must report the configured fraction to the UI.
+        cfg = dict(CFG, space_margin_percent=30)
+        free = int(TB * 0.20)
+        res = self._get(cfg=cfg, df_by_path={
+            "/mnt/internal/movies": (TB, TB - free, free),
+            "/mnt/external/movies": (TB, 0, TB),
+        })
+        data = res.get_json()
+        self.assertEqual(data["margin_fraction"], 0.30)
+        self.assertEqual(data["chosen_path"], "/mnt/external/movies")
+
+    def test_zero_margin_accepts_nearly_full_disk(self):
+        # Margin configured off: primary fits as long as the bytes do.
+        cfg = dict(CFG, space_margin_percent=0)
+        res = self._get(cfg=cfg, df_by_path={
+            "/mnt/internal/movies": (TB, TB - 5, 5),
+            "/mnt/external/movies": (TB, 0, TB),
+        })
+        data = res.get_json()
+        self.assertEqual(data["margin_fraction"], 0.0)
+        self.assertEqual(data["chosen_path"], "/mnt/internal/movies")
 
     def test_no_disk_fits(self):
         res = self._get(df_by_path={

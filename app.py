@@ -400,18 +400,37 @@ def _remote_df(user, host, port, path):
         raise RuntimeError("df columns were not integers")
 
 
-# A copy must leave at least this fraction of the destination disk free —
+# A copy must leave at least this percent of the destination disk free —
 # both as headroom for size-estimation error and so the SSDs never sit at
-# 100% full.
-SPACE_MARGIN_FRACTION = 0.08
+# 100% full. Configurable in Settings (media config `space_margin_percent`,
+# 0-50); this is the default when unset.
+DEFAULT_SPACE_MARGIN_PERCENT = 8
 
 
-def _space_shortfall(need, total, available):
+def _space_margin_fraction(cfg):
+    """The configured free-space margin as a fraction of disk size.
+
+    Reads `space_margin_percent` from the media config dict; falls back to
+    the default on missing/malformed/out-of-range values so a hand-edited
+    config file can't silently disable the margin.
+    """
+    try:
+        pct = int((cfg or {}).get("space_margin_percent",
+                                  DEFAULT_SPACE_MARGIN_PERCENT))
+    except (TypeError, ValueError):
+        pct = DEFAULT_SPACE_MARGIN_PERCENT
+    if not 0 <= pct <= 50:
+        pct = DEFAULT_SPACE_MARGIN_PERCENT
+    return pct / 100.0
+
+
+def _space_shortfall(need, total, available, margin_fraction):
     """Bytes missing for `need` to fit while leaving the safety margin free.
 
-    Returns 0 when the copy fits, i.e. available - need >= 8% of the disk.
+    Returns 0 when the copy fits, i.e. available - need >= margin_fraction
+    of the disk.
     """
-    required = need + int(total * SPACE_MARGIN_FRACTION)
+    required = need + int(total * margin_fraction)
     return max(0, required - available)
 
 
@@ -738,6 +757,10 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         bwlimit_kbps = 0
     bwlimit_args = [f"--bwlimit={bwlimit_kbps}"] if bwlimit_kbps > 0 else []
 
+    # Free-space margin from media config (Settings), shared by the disk
+    # selection below and both preflight checks.
+    margin_fraction = _space_margin_fraction(cfg)
+
     # ---- Multi-disk fallback selection ----
     # `candidates` is the ordered list of same-name folders configured for
     # this destination label. When more than one exists we df each and pick
@@ -771,7 +794,8 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                 tried.append({"path": cand["path"], "free": None, "error": str(e)})
                 continue
             tried.append({"path": cand["path"], "free": free})
-            if _space_shortfall(preflight_bytes, disk_total, free) == 0:
+            if _space_shortfall(preflight_bytes, disk_total, free,
+                                margin_fraction) == 0:
                 picked = cand
                 break
         if picked is None:
@@ -783,7 +807,7 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                 msg = (
                     f"Not enough space on any '{folder.get('name') if folder else ''}' "
                     f"destination — need {preflight_bytes} bytes plus "
-                    f"{SPACE_MARGIN_FRACTION:.0%} margin; tried {summary}"
+                    f"{margin_fraction:.0%} margin; tried {summary}"
                 )
                 db.log_event(
                     "copy.space_insufficient",
@@ -930,11 +954,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                         torrent_id=tid, torrent_name=torrent_name,
                     )
                 if free_bytes is not None and _space_shortfall(
-                        total_bytes_est, disk_total, free_bytes):
+                        total_bytes_est, disk_total, free_bytes,
+                        margin_fraction):
                     msg = (
                         f"Not enough space on {host}:{dest_root} — "
                         f"need {total_bytes_est} bytes plus "
-                        f"{SPACE_MARGIN_FRACTION:.0%} margin, "
+                        f"{margin_fraction:.0%} margin, "
                         f"{free_bytes} available."
                     )
                     db.log_event(
@@ -1153,11 +1178,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                     torrent_id=tid, torrent_name=torrent_name,
                 )
             if free_bytes is not None and _space_shortfall(
-                    estimated_bytes, disk_total, free_bytes):
+                    estimated_bytes, disk_total, free_bytes,
+                    margin_fraction):
                 msg = (
                     f"Not enough space on {host}:{dest_root} — "
                     f"need {estimated_bytes} bytes plus "
-                    f"{SPACE_MARGIN_FRACTION:.0%} margin, "
+                    f"{margin_fraction:.0%} margin, "
                     f"{free_bytes} available."
                 )
                 db.log_event(
@@ -3158,6 +3184,15 @@ def api_media_config_set():
         return _err("bwlimit_kbps must be an integer (KB/s)", 400)
     if bwlimit_kbps < 0:
         return _err("bwlimit_kbps must be zero or positive", 400)
+    # Free-space margin copies must leave on the destination disk, as a
+    # percent of the disk's total size. 0 disables the margin entirely.
+    margin_raw = data.get("space_margin_percent", DEFAULT_SPACE_MARGIN_PERCENT)
+    try:
+        space_margin_percent = int(margin_raw)
+    except (TypeError, ValueError):
+        return _err("space_margin_percent must be an integer (percent)", 400)
+    if not 0 <= space_margin_percent <= 50:
+        return _err("space_margin_percent must be between 0 and 50", 400)
     if not isinstance(folders_raw, list) or not folders_raw:
         return _err("at least one destination folder is required", 400)
     folders = []
@@ -3211,7 +3246,8 @@ def api_media_config_set():
         library_refresh["token"] = token
 
     cfg = {"host": host, "user": user, "port": port,
-           "folders": folders, "library_refresh": library_refresh}
+           "folders": folders, "library_refresh": library_refresh,
+           "space_margin_percent": space_margin_percent}
     if bwlimit_kbps:
         cfg["bwlimit_kbps"] = bwlimit_kbps
     try:
@@ -3525,6 +3561,7 @@ def api_copy_preflight(tid):
     user = cfg["user"]
     host = cfg["host"]
     port = int(cfg.get("port") or 22)
+    margin_fraction = _space_margin_fraction(cfg)
     disks = []
     for cand in candidates:
         entry = {"path": cand["path"], "total": None, "free": None,
@@ -3533,7 +3570,8 @@ def api_copy_preflight(tid):
             disk_total, _, free = _remote_df(user, host, port, cand["path"])
             entry["total"] = disk_total
             entry["free"] = free
-            entry["fits"] = _space_shortfall(need, disk_total, free) == 0
+            entry["fits"] = _space_shortfall(need, disk_total, free,
+                                             margin_fraction) == 0
         except RuntimeError as e:
             entry["error"] = str(e)
         disks.append(entry)
@@ -3559,7 +3597,7 @@ def api_copy_preflight(tid):
     return jsonify({
         "ok": True,
         "need": need,
-        "margin_fraction": SPACE_MARGIN_FRACTION,
+        "margin_fraction": margin_fraction,
         "disks": disks,
         "chosen_path": chosen,
     })
