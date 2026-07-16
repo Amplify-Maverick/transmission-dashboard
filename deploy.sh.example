@@ -36,13 +36,15 @@ read -rp "Press Enter to deploy to ${VPS_HOST}, or Ctrl+C to abort: " _
 
 echo
 echo "=== Deploying to $VPS_HOST ==="
-# Never ship secrets, the DB, runtime state, or the local venv.
+# Never ship secrets, the DB, runtime state, or the local venv. `.git/config`
+# stays too: the server keeps its own remote URL (e.g. anonymous HTTPS) so the
+# update badge's `git fetch` keeps working even if your local remote is SSH.
 rsync -avz \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' \
   --exclude='.env' --exclude='.flask_secret' \
   --exclude='dashboard.db' --exclude='dashboard.db-shm' --exclude='dashboard.db-wal' \
   --exclude='media_config.json' --exclude='copy_state.json' --exclude='scan_state.json' \
-  --exclude='deploy.sh' \
+  --exclude='deploy.sh' --exclude='.git/config' \
   "$LOCAL_DIR" \
   "$VPS_HOST:$REMOTE_DIR/"
 

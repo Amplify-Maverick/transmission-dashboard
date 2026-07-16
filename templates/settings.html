@@ -99,7 +99,7 @@
                     <div class="settings-field">
                         <label class="field-label" for="media-margin-input">Free space margin (%)</label>
                         <input type="number" id="media-margin-input" placeholder="8" min="0" max="50">
-                        <p class="field-hint">Copies must leave this much of each destination disk free (0&ndash;50). 0 allows filling a disk completely. Folder rows below can override this per drive.</p>
+                        <p class="field-hint">Copies must leave this much of each destination disk free (0&ndash;50). 0 allows filling a disk completely. The per-drive fields below override this for individual drives.</p>
                     </div>
                 </div>
 
@@ -139,11 +139,24 @@
                         Reusing a label across rows makes them a fallback group — copies land on the first row with enough free space.
                         The optional <strong>Plex section</strong> column is the numeric ID of the library to refresh after a copy
                         (only used when library refresh is set to Plex below).
-                        The optional <strong>margin</strong> column overrides the free space margin for that drive; blank uses the global value.
                     </p>
                     <div class="media-folders" id="media-folders"></div>
                     <div>
                         <button type="button" class="btn btn-sm" id="media-add-folder-btn">+ Add folder</button>
+                    </div>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label">Per-drive free space margins</label>
+                    <p class="field-hint">
+                        One field per drive on the media server, detected from the folder paths above.
+                        Blank uses the global margin. Multiple folders on the same drive share one margin.
+                    </p>
+                    <div class="media-drives" id="media-drives">
+                        <p class="field-hint media-drives-empty">No drives detected yet.</p>
+                    </div>
+                    <div>
+                        <button type="button" class="btn btn-sm" id="media-detect-drives-btn">Detect drives</button>
                     </div>
                 </div>
 
@@ -391,20 +404,18 @@
         const mediaSaveBtn = document.getElementById('media-save-btn');
         const mediaTestBtn = document.getElementById('media-test-btn');
 
-        function buildFolderRow(name = '', path = '', plexSectionId = '', marginPercent = '') {
+        function buildFolderRow(name = '', path = '', plexSectionId = '') {
             const row = document.createElement('div');
             row.className = 'media-folder-row';
             row.innerHTML = `
                 <input type="text" class="media-folder-name" placeholder="Movies" autocomplete="off" spellcheck="false">
                 <input type="text" class="media-folder-path" placeholder="/mnt/media/movies" autocomplete="off" spellcheck="false">
                 <input type="text" class="media-folder-plex" placeholder="Plex §" autocomplete="off" spellcheck="false" inputmode="numeric" title="Plex section ID (number)">
-                <input type="text" class="media-folder-margin" placeholder="margin %" autocomplete="off" spellcheck="false" inputmode="numeric" title="Free space margin override for this drive (0-50%); blank uses the global value">
                 <button type="button" class="btn btn-sm media-folder-remove" aria-label="Remove folder">&times;</button>
             `;
             row.querySelector('.media-folder-name').value = name;
             row.querySelector('.media-folder-path').value = path;
             row.querySelector('.media-folder-plex').value = plexSectionId;
-            row.querySelector('.media-folder-margin').value = marginPercent;
             row.querySelector('.media-folder-remove').addEventListener('click', () => {
                 row.remove();
                 if (!mediaFoldersEl.querySelector('.media-folder-row')) {
@@ -423,9 +434,7 @@
                 return;
             }
             folders.forEach(f => mediaFoldersEl.appendChild(buildFolderRow(
-                f.name || '', f.path || '', f.plex_section_id || '',
-                // 0 is a valid override — only blank when the key is absent.
-                f.space_margin_percent ?? ''
+                f.name || '', f.path || '', f.plex_section_id || ''
             )));
         }
 
@@ -436,16 +445,140 @@
                 const name = row.querySelector('.media-folder-name').value.trim();
                 const path = row.querySelector('.media-folder-path').value.trim();
                 const plexSectionId = row.querySelector('.media-folder-plex').value.trim();
-                const marginPercent = row.querySelector('.media-folder-margin').value.trim();
                 if (name || path) {
                     const entry = { name, path };
                     if (plexSectionId) entry.plex_section_id = plexSectionId;
-                    if (marginPercent !== '') entry.space_margin_percent = marginPercent;
                     out.push(entry);
                 }
             });
             return out;
         }
+
+        // ----- per-drive free space margins -----
+        //
+        // One margin field per drive (filesystem) on the media server,
+        // keyed by mountpoint. Drives come from /api/media/drives (an SSH
+        // df across the folder paths); saved overrides for drives that are
+        // currently unreachable still get an editable row so they can't be
+        // silently lost.
+
+        const mediaDrivesEl = document.getElementById('media-drives');
+        const mediaDetectDrivesBtn = document.getElementById('media-detect-drives-btn');
+
+        function fmtDriveSize(bytes) {
+            if (bytes == null || !isFinite(bytes)) return '';
+            const TB = 1e12, GB = 1e9;
+            if (bytes >= TB) return (bytes / TB).toFixed(1) + ' TB';
+            return Math.round(bytes / GB) + ' GB';
+        }
+
+        function buildDriveRow(mountpoint, meta, marginPercent) {
+            const row = document.createElement('div');
+            row.className = 'media-drive-row';
+            row.dataset.mountpoint = mountpoint;
+            const info = document.createElement('div');
+            info.className = 'media-drive-info';
+            const mp = document.createElement('code');
+            mp.textContent = mountpoint;
+            info.appendChild(mp);
+            if (meta) {
+                const metaEl = document.createElement('span');
+                metaEl.className = 'media-drive-meta';
+                metaEl.textContent = meta;
+                info.appendChild(metaEl);
+            }
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'media-drive-margin';
+            input.placeholder = 'global';
+            input.autocomplete = 'off';
+            input.spellcheck = false;
+            input.inputMode = 'numeric';
+            input.title = 'Free space margin for this drive (0-50%); blank uses the global value';
+            input.value = marginPercent ?? '';
+            input.addEventListener('input', clearMediaBanner);
+            row.appendChild(info);
+            row.appendChild(input);
+            return row;
+        }
+
+        function renderDrives(drives, margins) {
+            mediaDrivesEl.innerHTML = '';
+            const m = margins || {};
+            const seen = new Set();
+            (drives || []).forEach(d => {
+                seen.add(d.mountpoint);
+                const parts = [d.device];
+                const size = fmtDriveSize(d.total);
+                if (size) parts.push(`${fmtDriveSize(d.free)} free of ${size}`);
+                if (d.folders && d.folders.length) parts.push(d.folders.join(', '));
+                mediaDrivesEl.appendChild(buildDriveRow(
+                    d.mountpoint, parts.join(' · '),
+                    // 0 is a valid override — only blank when absent.
+                    m[d.mountpoint] ?? ''
+                ));
+            });
+            // Saved overrides for drives the probe didn't see (offline USB
+            // disk, changed paths) stay visible and editable.
+            Object.keys(m).forEach(mp => {
+                if (seen.has(mp)) return;
+                mediaDrivesEl.appendChild(buildDriveRow(
+                    mp, 'not detected — drive offline?', m[mp]
+                ));
+            });
+            if (!mediaDrivesEl.children.length) {
+                const p = document.createElement('p');
+                p.className = 'field-hint media-drives-empty';
+                p.textContent = 'No drives detected yet.';
+                mediaDrivesEl.appendChild(p);
+            }
+        }
+
+        function collectDriveMargins() {
+            // Returns {mountpoint: percent} for non-blank fields, or
+            // null after showing an error for an invalid value.
+            const out = {};
+            for (const row of mediaDrivesEl.querySelectorAll('.media-drive-row')) {
+                const mp = row.dataset.mountpoint;
+                const raw = row.querySelector('.media-drive-margin').value.trim();
+                if (raw === '') continue;
+                if (!/^\d+$/.test(raw) || parseInt(raw, 10) > 50) {
+                    showMediaError(`Margin for drive '${mp}' must be a whole number between 0 and 50 (%).`);
+                    return null;
+                }
+                out[mp] = parseInt(raw, 10);
+            }
+            return out;
+        }
+
+        let savedDriveMargins = {};
+
+        async function detectDrives(quiet = false) {
+            mediaDetectDrivesBtn.disabled = true;
+            const prev = mediaDetectDrivesBtn.textContent;
+            mediaDetectDrivesBtn.textContent = 'Detecting…';
+            try {
+                const res = await fetch('/api/media/drives');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                const data = await res.json();
+                // Unsaved edits win over what the server has on disk.
+                const current = collectDriveMargins();
+                const margins = Object.assign(
+                    {}, data.drive_margins || savedDriveMargins, current || {});
+                if (!data.ok) {
+                    renderDrives([], margins);
+                    if (!quiet) showMediaError('Drive detection failed: ' + (data.error || 'unknown error'));
+                    return;
+                }
+                renderDrives(data.drives, margins);
+            } catch (err) {
+                if (!quiet) showMediaError('Drive detection failed: ' + err.message);
+            } finally {
+                mediaDetectDrivesBtn.disabled = false;
+                mediaDetectDrivesBtn.textContent = prev;
+            }
+        }
+        mediaDetectDrivesBtn.addEventListener('click', () => detectDrives());
 
         // ----- library refresh -----
 
@@ -524,6 +657,12 @@
                 // shows the default) when the key is absent.
                 mediaMarginEl.value = cfg.space_margin_percent ?? '';
                 renderFolders(cfg.folders);
+                savedDriveMargins = cfg.drive_margins || {};
+                // Saved overrides show immediately; the SSH probe fills in
+                // the rest in the background (quiet — an unreachable media
+                // server shouldn't greet the page with an error banner).
+                renderDrives([], savedDriveMargins);
+                detectDrives(true);
                 applyLibraryConfig(cfg);
             } catch (err) {
                 showMediaError('Failed to load media config: ' + err.message);
@@ -548,12 +687,15 @@
                 showMediaError('Free space margin must be a whole number between 0 and 50 (%).');
                 return;
             }
+            const drive_margins = collectDriveMargins();
+            if (drive_margins === null) return;
             const body = {
                 user: mediaUserEl.value.trim(),
                 host: mediaHostEl.value.trim(),
                 port: parseInt(mediaPortEl.value, 10) || 22,
                 bwlimit_kbps: bwlimit,
                 space_margin_percent: margin,
+                drive_margins,
                 folders,
                 library_refresh,
             };
@@ -575,12 +717,6 @@
                 }
                 if (f.plex_section_id && !/^\d+$/.test(f.plex_section_id)) {
                     showMediaError(`Folder '${f.name}' Plex section must be a number.`);
-                    return;
-                }
-                if (f.space_margin_percent !== undefined
-                        && (!/^\d+$/.test(f.space_margin_percent)
-                            || parseInt(f.space_margin_percent, 10) > 50)) {
-                    showMediaError(`Folder '${f.name}' margin must be a whole number between 0 and 50 (%).`);
                     return;
                 }
                 if (seenPaths.has(f.path)) {
@@ -615,6 +751,7 @@
                 if (!res.ok || (data && data.ok === false)) {
                     throw new Error((data && data.error) || ('HTTP ' + res.status));
                 }
+                savedDriveMargins = drive_margins;
                 toast('Media destination saved', 'success');
             } catch (err) {
                 showMediaError('Save failed: ' + err.message);

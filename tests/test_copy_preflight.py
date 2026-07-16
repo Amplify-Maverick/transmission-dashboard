@@ -45,6 +45,8 @@ class PreflightTests(unittest.TestCase):
         """Call the endpoint with mocked config, source, and remote df.
 
         df_by_path maps path -> (total, used, available) or an Exception.
+        The fake df reports the path's parent directory as the drive's
+        mountpoint (e.g. /mnt/internal/movies lives on /mnt/internal).
         """
         def fake_df(user, host, port, path):
             v = (df_by_path or {}).get(path)
@@ -52,7 +54,7 @@ class PreflightTests(unittest.TestCase):
                 raise v
             if v is None:
                 raise AssertionError(f"unexpected df for {path}")
-            return v
+            return (*v, os.path.dirname(path))
 
         with patch.object(app, "_read_media_config", return_value=cfg), \
              patch.object(app.client, "get_torrent_location",
@@ -116,16 +118,12 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(data["margin_fraction"], 0.0)
         self.assertEqual(data["chosen_path"], "/mnt/internal/movies")
 
-    def test_per_folder_margin_overrides_global(self):
+    def test_per_drive_margin_overrides_global(self):
         # Global 5%, but the internal drive carries a 30% override: with
         # 20% free it must be rejected while the external drive (global 5%)
         # takes the copy. Each disk reports its own margin_fraction.
-        cfg = dict(CFG, space_margin_percent=5)
-        cfg["folders"] = [
-            {"name": "Movies", "path": "/mnt/internal/movies",
-             "space_margin_percent": 30},
-            {"name": "Movies", "path": "/mnt/external/movies"},
-        ]
+        cfg = dict(CFG, space_margin_percent=5,
+                   drive_margins={"/mnt/internal": 30})
         free = int(TB * 0.20)
         res = self._get(cfg=cfg, df_by_path={
             "/mnt/internal/movies": (TB, TB - free, free),

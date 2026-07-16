@@ -364,8 +364,8 @@ def _estimate_source_size(media_type, source, video_files=None):
 
 
 def _remote_df(user, host, port, path):
-    """SSH to host and return (total, used, available) bytes for the
-    filesystem holding `path`.
+    """SSH to host and return (total, used, available, mountpoint) for the
+    filesystem holding `path` — sizes in bytes, mountpoint as df reports it.
 
     Raises RuntimeError if the SSH call fails or df output can't be parsed.
     """
@@ -392,10 +392,11 @@ def _remote_df(user, host, port, path):
         raise RuntimeError("df output was empty")
     # POSIX df -P: Filesystem 1B-blocks Used Available Capacity Mounted-on
     parts = lines[-1].split()
-    if len(parts) < 5:
+    if len(parts) < 6:
         raise RuntimeError("df output was malformed")
     try:
-        return int(parts[1]), int(parts[2]), int(parts[3])
+        # Mountpoints may contain spaces — everything past Capacity is one.
+        return int(parts[1]), int(parts[2]), int(parts[3]), " ".join(parts[5:])
     except ValueError:
         raise RuntimeError("df columns were not integers")
 
@@ -407,16 +408,23 @@ def _remote_df(user, host, port, path):
 DEFAULT_SPACE_MARGIN_PERCENT = 8
 
 
-def _space_margin_fraction(cfg, folder=None):
+def _space_margin_fraction(cfg, mountpoint=None):
     """The configured free-space margin as a fraction of disk size.
 
-    A folder-level `space_margin_percent` (the per-drive override column in
+    A per-drive entry in the config's `drive_margins` dict (keyed by the
+    drive's mountpoint on the media server — the per-drive fields in
     Settings) wins over the config-wide value. Missing/malformed/
     out-of-range values fall through to the next level and ultimately the
     default, so a hand-edited config file can't silently disable the margin.
     """
-    for scope in (folder, cfg):
-        raw = (scope or {}).get("space_margin_percent")
+    drive_margins = (cfg or {}).get("drive_margins")
+    if not isinstance(drive_margins, dict):
+        drive_margins = {}
+    candidates = []
+    if mountpoint:
+        candidates.append(drive_margins.get(mountpoint))
+    candidates.append((cfg or {}).get("space_margin_percent"))
+    for raw in candidates:
         if raw is None:
             continue
         try:
@@ -440,7 +448,7 @@ def _space_shortfall(need, total, available, margin_fraction):
 
 def _remote_df_multi(user, host, port, paths):
     """SSH once and run df on multiple paths. Returns a list of dicts:
-    [{device, total, used, available}, ...].
+    [{device, mountpoint, total, used, available}, ...].
 
     Paths that share a filesystem may collapse into a single row (df's own
     behaviour) — callers that want to dedupe should key on `device`. Raises
@@ -479,6 +487,8 @@ def _remote_df_multi(user, host, port, paths):
                 "total": int(parts[1]),
                 "used": int(parts[2]),
                 "available": int(parts[3]),
+                # Everything past Capacity is the mountpoint (may have spaces).
+                "mountpoint": " ".join(parts[5:]),
             })
         except ValueError:
             continue
@@ -789,11 +799,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         tried = []
         for cand in candidates:
             try:
-                disk_total, _, free = _remote_df(user, host, port, cand["path"])
+                disk_total, _, free, cand_mount = _remote_df(
+                    user, host, port, cand["path"])
             except RuntimeError as e:
                 tried.append({"path": cand["path"], "free": None, "error": str(e)})
                 continue
-            cand_margin = _space_margin_fraction(cfg, cand)
+            cand_margin = _space_margin_fraction(cfg, cand_mount)
             tried.append({"path": cand["path"], "free": free,
                           "margin_percent": round(cand_margin * 100)})
             if _space_shortfall(preflight_bytes, disk_total, free,
@@ -840,9 +851,9 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         folder = picked
         dest_root = picked["path"]
 
-    # Free-space margin of the destination drive (folder-level override,
-    # else the config-wide value) — used by both preflight checks below.
-    margin_fraction = _space_margin_fraction(cfg, folder)
+    # The destination drive's free-space margin (per-drive override, else
+    # the config-wide value) is resolved inside each preflight block below,
+    # once df has told us which drive dest_root actually lives on.
 
     if media_type == "show" and season_groups:
         # Multi-season: each detected season copies into its own
@@ -949,10 +960,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
 
             if total_bytes_est > 0:
                 free_bytes = disk_total = None
+                margin_fraction = _space_margin_fraction(cfg)
                 try:
-                    disk_total, _, free_bytes = _remote_df(
+                    disk_total, _, free_bytes, dest_mount = _remote_df(
                         user, host, port, dest_root,
                     )
+                    margin_fraction = _space_margin_fraction(cfg, dest_mount)
                 except RuntimeError as e:
                     db.log_event(
                         "copy.preflight.skipped",
@@ -1173,10 +1186,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         # — let rsync surface the real error — but a confirmed shortfall is.
         if estimated_bytes > 0:
             free_bytes = disk_total = None
+            margin_fraction = _space_margin_fraction(cfg)
             try:
-                disk_total, _, free_bytes = _remote_df(
+                disk_total, _, free_bytes, dest_mount = _remote_df(
                     user, host, port, dest_root,
                 )
+                margin_fraction = _space_margin_fraction(cfg, dest_mount)
             except RuntimeError as e:
                 db.log_event(
                     "copy.preflight.skipped",
@@ -3220,23 +3235,6 @@ def api_media_config_set():
                     f"folder '{name}' plex_section_id must be a number",
                     400,
                 )
-        # Optional per-drive free-space margin override; blank/absent means
-        # the config-wide space_margin_percent applies.
-        folder_margin = None
-        margin_raw_f = f.get("space_margin_percent")
-        if margin_raw_f is not None and str(margin_raw_f).strip() != "":
-            try:
-                folder_margin = int(str(margin_raw_f).strip())
-            except (TypeError, ValueError):
-                return _err(
-                    f"folder '{name}' margin must be an integer (percent)",
-                    400,
-                )
-            if not 0 <= folder_margin <= 50:
-                return _err(
-                    f"folder '{name}' margin must be between 0 and 50",
-                    400,
-                )
         if not name:
             return _err(f"folder #{i+1} is missing a name", 400)
         if not path:
@@ -3252,9 +3250,29 @@ def api_media_config_set():
         entry = {"name": name, "path": path}
         if section_id:
             entry["plex_section_id"] = section_id
-        if folder_margin is not None:
-            entry["space_margin_percent"] = folder_margin
         folders.append(entry)
+
+    # Optional per-drive free-space margin overrides, keyed by the drive's
+    # mountpoint on the media server (Settings renders one field per
+    # detected drive). Blank values mean "use the config-wide margin" and
+    # are simply dropped.
+    dm_raw = data.get("drive_margins") or {}
+    if not isinstance(dm_raw, dict):
+        return _err("drive_margins must be an object of {mountpoint: percent}", 400)
+    drive_margins = {}
+    for mp_raw, val in dm_raw.items():
+        mp = str(mp_raw).strip()
+        if not mp.startswith("/"):
+            return _err(f"drive mountpoint '{mp}' must be an absolute path", 400)
+        if val is None or str(val).strip() == "":
+            continue
+        try:
+            pct = int(str(val).strip())
+        except (TypeError, ValueError):
+            return _err(f"margin for drive '{mp}' must be an integer (percent)", 400)
+        if not 0 <= pct <= 50:
+            return _err(f"margin for drive '{mp}' must be between 0 and 50", 400)
+        drive_margins[mp] = pct
 
     lib_raw = data.get("library_refresh") or {}
     lib_type = (lib_raw.get("type") or "none").strip().lower()
@@ -3274,6 +3292,8 @@ def api_media_config_set():
     cfg = {"host": host, "user": user, "port": port,
            "folders": folders, "library_refresh": library_refresh,
            "space_margin_percent": space_margin_percent}
+    if drive_margins:
+        cfg["drive_margins"] = drive_margins
     if bwlimit_kbps:
         cfg["bwlimit_kbps"] = bwlimit_kbps
     try:
@@ -3281,6 +3301,64 @@ def api_media_config_set():
     except OSError as e:
         return _err(f"failed to write media config: {e}")
     return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/media/drives")
+@login_required
+def api_media_drives():
+    """The distinct drives (filesystems) behind the configured destination
+    folders, so Settings can render one free-space-margin field per drive.
+
+    SSHes the media server, dfs every folder path in one call, and dedupes
+    by device. Folders are attached to their drive by longest-mountpoint
+    prefix match. Returns ok=False with an error string when the server is
+    unreachable — the UI then falls back to the saved margins alone.
+    """
+    cfg = _read_media_config()
+    folders = cfg.get("folders") or []
+    host = (cfg.get("host") or "").strip()
+    user = (cfg.get("user") or "").strip()
+    saved = cfg.get("drive_margins") if isinstance(
+        cfg.get("drive_margins"), dict) else {}
+    if not host or not user or not folders:
+        return jsonify({"ok": True, "configured": False, "drives": [],
+                        "drive_margins": saved})
+    paths = [p for p in ((f.get("path") or "").strip() for f in folders) if p]
+    if not paths:
+        return jsonify({"ok": True, "configured": False, "drives": [],
+                        "drive_margins": saved})
+    try:
+        rows = _remote_df_multi(user, host, int(cfg.get("port") or 22), paths)
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e), "drives": [],
+                        "drive_margins": saved})
+    drives = []
+    seen_devices = set()
+    for row in rows:
+        if row["device"] in seen_devices or not row.get("mountpoint"):
+            continue
+        seen_devices.add(row["device"])
+        drives.append({
+            "device": row["device"],
+            "mountpoint": row["mountpoint"],
+            "total": row["total"],
+            "free": row["available"],
+            "folders": [],
+        })
+    for f in folders:
+        p = (f.get("path") or "").strip()
+        if not p:
+            continue
+        best = None
+        for d in drives:
+            mp = d["mountpoint"]
+            if p == mp or p.startswith(mp.rstrip("/") + "/"):
+                if best is None or len(mp) > len(best["mountpoint"]):
+                    best = d
+        if best is not None:
+            best["folders"].append(f.get("name") or p)
+    return jsonify({"ok": True, "configured": True, "drives": drives,
+                    "drive_margins": saved})
 
 
 @app.route("/api/media/test", methods=["POST"])
@@ -3589,12 +3667,17 @@ def api_copy_preflight(tid):
     port = int(cfg.get("port") or 22)
     disks = []
     for cand in candidates:
-        cand_margin = _space_margin_fraction(cfg, cand)
+        # Until df tells us which drive the path lives on, report the
+        # config-wide margin; a per-drive override replaces it below.
         entry = {"path": cand["path"], "total": None, "free": None,
                  "fits": None, "error": None,
-                 "margin_fraction": cand_margin}
+                 "margin_fraction": _space_margin_fraction(cfg)}
         try:
-            disk_total, _, free = _remote_df(user, host, port, cand["path"])
+            disk_total, _, free, mount = _remote_df(
+                user, host, port, cand["path"])
+            cand_margin = _space_margin_fraction(cfg, mount)
+            entry["margin_fraction"] = cand_margin
+            entry["mountpoint"] = mount
             entry["total"] = disk_total
             entry["free"] = free
             entry["fits"] = _space_shortfall(need, disk_total, free,

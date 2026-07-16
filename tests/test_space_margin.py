@@ -103,26 +103,30 @@ class TestSpaceMarginFraction(unittest.TestCase):
             DEFAULT_FRACTION,
         )
 
-    def test_folder_override_wins_over_config(self):
-        cfg = {"space_margin_percent": 10}
-        folder = {"path": "/mnt/x", "space_margin_percent": 3}
-        self.assertEqual(_space_margin_fraction(cfg, folder), 0.03)
+    def test_drive_override_wins_over_config(self):
+        cfg = {"space_margin_percent": 10, "drive_margins": {"/mnt/x": 3}}
+        self.assertEqual(_space_margin_fraction(cfg, "/mnt/x"), 0.03)
 
-    def test_folder_zero_override_wins(self):
-        cfg = {"space_margin_percent": 10}
-        folder = {"path": "/mnt/x", "space_margin_percent": 0}
-        self.assertEqual(_space_margin_fraction(cfg, folder), 0.0)
+    def test_drive_zero_override_wins(self):
+        cfg = {"space_margin_percent": 10, "drive_margins": {"/mnt/x": 0}}
+        self.assertEqual(_space_margin_fraction(cfg, "/mnt/x"), 0.0)
 
-    def test_folder_without_override_uses_config(self):
-        cfg = {"space_margin_percent": 10}
-        self.assertEqual(
-            _space_margin_fraction(cfg, {"path": "/mnt/x"}), 0.10
-        )
+    def test_drive_without_override_uses_config(self):
+        cfg = {"space_margin_percent": 10, "drive_margins": {"/mnt/x": 3}}
+        self.assertEqual(_space_margin_fraction(cfg, "/mnt/y"), 0.10)
 
-    def test_malformed_folder_override_falls_back_to_config(self):
-        cfg = {"space_margin_percent": 10}
-        folder = {"path": "/mnt/x", "space_margin_percent": 99}
-        self.assertEqual(_space_margin_fraction(cfg, folder), 0.10)
+    def test_no_mountpoint_uses_config(self):
+        cfg = {"space_margin_percent": 10, "drive_margins": {"/mnt/x": 3}}
+        self.assertEqual(_space_margin_fraction(cfg), 0.10)
+
+    def test_malformed_drive_override_falls_back_to_config(self):
+        cfg = {"space_margin_percent": 10, "drive_margins": {"/mnt/x": 99}}
+        self.assertEqual(_space_margin_fraction(cfg, "/mnt/x"), 0.10)
+
+    def test_non_dict_drive_margins_falls_back_to_config(self):
+        # A hand-edited config can't crash margin resolution.
+        cfg = {"space_margin_percent": 10, "drive_margins": "oops"}
+        self.assertEqual(_space_margin_fraction(cfg, "/mnt/x"), 0.10)
 
 
 if __name__ == "__main__":

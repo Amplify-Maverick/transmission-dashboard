@@ -2638,7 +2638,7 @@ body.select-mode-right .torrent-list {
 
 .media-folder-row {
     display: grid;
-    grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) 90px 90px auto;
+    grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) 90px auto;
     gap: 8px;
     align-items: center;
 }
@@ -2647,9 +2647,41 @@ body.select-mode-right .torrent-list {
     width: 100%;
 }
 
-.media-folder-row .media-folder-plex,
-.media-folder-row .media-folder-margin {
+.media-folder-row .media-folder-plex {
     text-align: center;
+}
+
+/* Per-drive free space margin rows (Settings): drive info + one input. */
+.media-drives {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 6px 0 10px;
+}
+
+.media-drive-row {
+    display: grid;
+    grid-template-columns: 1fr 90px;
+    gap: 8px;
+    align-items: center;
+}
+
+.media-drive-row .media-drive-margin {
+    width: 100%;
+    text-align: center;
+}
+
+.media-drive-info {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.media-drive-meta {
+    color: var(--muted);
+    font-size: 12px;
 }
 
 .media-folder-remove {
