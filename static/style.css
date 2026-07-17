@@ -19,6 +19,21 @@
 
 * { box-sizing: border-box; }
 
+html {
+    /* Stop iOS Safari from inflating text in landscape. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+/* Kill the 300ms double-tap-zoom delay and the grey iOS tap flash on all
+   interactive elements; :active states below provide the touch feedback. */
+a, button, input, select, textarea, label {
+    touch-action: manipulation;
+}
+a, button {
+    -webkit-tap-highlight-color: transparent;
+}
+
 html, body {
     margin: 0;
     height: 100%;
@@ -481,8 +496,10 @@ body {
         font-size: 12px;
         text-align: center;
     }
-    /* Filter tabs duplicate what the columns now express. */
-    .tabs .tab { display: none; }
+    /* Filter tabs duplicate what the columns now express. Scoped to the
+       torrents page — History/Events reuse .tabs for filters that must
+       stay visible on desktop. */
+    .tabs--torrents .tab { display: none; }
 }
 
 .empty-state {
@@ -942,6 +959,11 @@ body {
 
 .ctx-menu[hidden] { display: none; }
 
+/* Torrent name shown at the top of the mobile bottom sheet — the card the
+   menu belongs to is often scrolled away or covered. Desktop anchors the
+   menu to the card's ⋮ button, so no header is needed there. */
+.ctx-sheet-title { display: none; }
+
 .ctx-item {
     appearance: none;
     background: transparent;
@@ -1045,6 +1067,8 @@ body {
 .modal-body {
     padding: 16px 18px;
     overflow-y: auto;
+    /* Don't chain scrolling to the page behind the dialog on touch. */
+    overscroll-behavior: contain;
     color: var(--text);
     font-size: 13px;
     line-height: 1.5;
@@ -1067,6 +1091,8 @@ body {
     border-radius: 4px;
     padding: 8px 10px;
     word-break: break-all;
+    /* Bulk confirms pass a newline-separated name list. */
+    white-space: pre-line;
 }
 
 .modal-footer {
@@ -2947,7 +2973,9 @@ body.select-mode-right .torrent-list {
     .modal-overlay { padding: 8px; align-items: flex-end; }
 
     .modal {
+        /* dvh tracks iOS Safari's collapsing URL bar; vh is the fallback. */
         max-height: calc(100vh - 16px);
+        max-height: calc(100dvh - 16px);
         border-radius: 8px;
     }
 
@@ -3041,11 +3069,17 @@ body.select-mode-right .torrent-list {
     }
 }
 
-/* Touch devices: bump tap targets a bit so chevron/menu are easy to hit. */
+/* Touch devices: bump tap targets a bit so chevron/menu are easy to hit,
+   and give press feedback (the iOS tap flash is disabled globally). */
 @media (hover: none) and (pointer: coarse) {
     .menu-btn { width: 40px; }
     .card-header { min-height: 56px; }
     .nav-link, .tab, .btn { min-height: 36px; }
+    .card-header:active { background: var(--panel-hover); }
+    .btn:active { background: rgba(255, 255, 255, 0.08); }
+    .menu-btn:active { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
+    .ctx-item:active:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+    .tab:active { color: var(--text); }
 }
 
 /* ============================================================
@@ -3144,7 +3178,10 @@ body.select-mode-right .torrent-list {
         border-right: none;
         border-bottom: none;
         padding: 8px 10px max(14px, env(safe-area-inset-bottom));
-        box-shadow: 0 -10px 32px rgba(0, 0, 0, 0.6);
+        /* The 100vmax spread doubles as a dim backdrop behind the sheet —
+           no extra overlay element needed (tap-anywhere-to-close already
+           works via the document click handler). */
+        box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45), 0 -10px 32px rgba(0, 0, 0, 0.6);
         animation: ctx-sheet-up 0.2s ease-out;
         /* Long menus (send targets etc.) must not extend past the top of
            short screens — cap the sheet and scroll inside it. */
@@ -3173,12 +3210,28 @@ body.select-mode-right .torrent-list {
 
     .ctx-sep { margin: 6px 8px; }
 
+    .ctx-sheet-title {
+        display: block;
+        padding: 2px 16px 10px;
+        margin-bottom: 4px;
+        border-bottom: 1px solid var(--border);
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
     /* Tap-friendly minimums for common interactive bits. */
     .tab, .add-tab, .nav-link { min-height: 44px; }
     .menu-btn { min-height: 48px; width: 44px; }
     .modal-close { padding: 6px 10px; font-size: 26px; line-height: 1; min-width: 44px; min-height: 44px; }
     .btn { min-height: 40px; }
     .btn-sm { min-height: 36px; }
+    .card-send-btn { min-height: 36px; }
+    .column-select-btn { min-height: 32px; }
+    .unloaded-toggle { min-height: 48px; }
 
     /* Belt-and-braces: no horizontal scroll anywhere on small viewports. */
     html, body { max-width: 100%; overflow-x: hidden; }
@@ -3391,10 +3444,21 @@ body.select-mode-right .torrent-list {
 .event-info    { border-left: 3px solid var(--accent); }
 
 @media (max-width: 720px) {
+    /* Two lines per event instead of three: time + type share the top
+       row, the message gets the full width below. */
     .event-row {
-        grid-template-columns: 1fr;
-        gap: 4px;
+        grid-template-columns: max-content 1fr;
+        gap: 3px 10px;
+        padding: 9px 10px;
     }
+    .event-type {
+        text-align: right;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+    }
+    .event-msg { grid-column: 1 / -1; }
     .hist-table .hist-name,
     .hist-table .hist-note {
         max-width: 200px;
@@ -3537,6 +3601,7 @@ body.select-mode-right .torrent-list {
         max-width: none;
         width: 100%;
         max-height: calc(100vh - 24px);
+        max-height: calc(100dvh - 24px);
         border-radius: 10px;
     }
     .modal-footer {
@@ -3551,15 +3616,18 @@ body.select-mode-right .torrent-list {
         font-size: 14px;
     }
 
-    /* iOS Safari: 16px form inputs prevent auto-zoom on focus. */
-    .modal-body input[type="text"],
-    .modal-body input[type="password"],
-    .modal-body input[type="number"],
-    .modal-body input[type="url"],
-    .modal-body input[type="search"],
-    .modal-body input[type="email"],
-    .modal-body textarea,
-    .modal-body select { font-size: 16px; }
+    /* iOS Safari: 16px form inputs prevent auto-zoom on focus. Page-wide,
+       not just modals — Settings and Login fields zoom too. #copy-folder is
+       listed explicitly because its base rule is an id selector. */
+    textarea,
+    select,
+    #copy-folder,
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    input[type="url"],
+    input[type="search"],
+    input[type="email"] { font-size: 16px; }
 
     /* Bottom-nav active state: slightly stronger highlight than the
        820px default since this is the primary nav on phones. */
@@ -3717,4 +3785,14 @@ body.select-mode-right .torrent-list {
         gap: 8px;
     }
     .unloaded-actions .btn { flex: 1 1 0; min-height: 36px; }
+}
+
+/* Respect the OS-level reduced-motion setting: kill the pulsing dots,
+   sheet slide-ups and expand fades. State is still conveyed by color. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }
