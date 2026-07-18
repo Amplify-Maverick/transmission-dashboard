@@ -97,10 +97,20 @@
                         <input type="number" id="media-bwlimit-input" placeholder="unlimited" min="0">
                         <p class="field-hint">Caps rsync so copies don't starve Transmission. Empty or 0 = unlimited.</p>
                     </div>
-                    <div class="settings-field">
-                        <label class="field-label" for="media-margin-input">Free space margin (%)</label>
-                        <input type="number" id="media-margin-input" placeholder="8" min="0" max="50">
-                        <p class="field-hint">Copies must leave this much of each destination disk free (0&ndash;50). 0 allows filling a disk completely. The per-drive fields below override this for individual drives.</p>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label">Free space margin per drive (%)</label>
+                    <p class="field-hint">
+                        One field per drive on the media server, detected from the destination folder paths below.
+                        Copies must leave this much of the drive free (0&ndash;50). 0 allows filling a drive completely.
+                        Multiple folders on the same drive share one margin; blank uses the default.
+                    </p>
+                    <div class="media-drives" id="media-drives">
+                        <p class="field-hint media-drives-empty">No drives detected yet.</p>
+                    </div>
+                    <div>
+                        <button type="button" class="btn btn-sm" id="media-detect-drives-btn">Detect drives</button>
                     </div>
                 </div>
 
@@ -144,20 +154,6 @@
                     <div class="media-folders" id="media-folders"></div>
                     <div>
                         <button type="button" class="btn btn-sm" id="media-add-folder-btn">+ Add folder</button>
-                    </div>
-                </div>
-
-                <div class="settings-field settings-field-wide">
-                    <label class="field-label">Per-drive free space margins</label>
-                    <p class="field-hint">
-                        One field per drive on the media server, detected from the folder paths above.
-                        Blank uses the global margin. Multiple folders on the same drive share one margin.
-                    </p>
-                    <div class="media-drives" id="media-drives">
-                        <p class="field-hint media-drives-empty">No drives detected yet.</p>
-                    </div>
-                    <div>
-                        <button type="button" class="btn btn-sm" id="media-detect-drives-btn">Detect drives</button>
                     </div>
                 </div>
 
@@ -395,7 +391,6 @@
         const mediaHostEl = document.getElementById('media-host-input');
         const mediaPortEl = document.getElementById('media-port-input');
         const mediaBwlimitEl = document.getElementById('media-bwlimit-input');
-        const mediaMarginEl = document.getElementById('media-margin-input');
         const mediaFoldersEl = document.getElementById('media-folders');
         const mediaAddFolderBtn = document.getElementById('media-add-folder-btn');
         const mediaErrorEl = document.getElementById('media-error');
@@ -491,11 +486,11 @@
             const input = document.createElement('input');
             input.type = 'text';
             input.className = 'media-drive-margin';
-            input.placeholder = 'global';
+            input.placeholder = String(savedGlobalMargin);
             input.autocomplete = 'off';
             input.spellcheck = false;
             input.inputMode = 'numeric';
-            input.title = 'Free space margin for this drive (0-50%); blank uses the global value';
+            input.title = 'Free space margin for this drive (0-50%); blank uses the ' + savedGlobalMargin + '% default';
             input.value = marginPercent ?? '';
             input.addEventListener('input', clearMediaBanner);
             row.appendChild(info);
@@ -553,6 +548,10 @@
         }
 
         let savedDriveMargins = {};
+        // The config still keeps a config-wide space_margin_percent as the
+        // fallback for undetected drives and the config-wide preflight; the
+        // UI no longer exposes it directly, so preserve whatever was saved.
+        let savedGlobalMargin = 8;
 
         async function detectDrives(quiet = false) {
             mediaDetectDrivesBtn.disabled = true;
@@ -654,9 +653,10 @@
                 mediaHostEl.value = cfg.host || '';
                 mediaPortEl.value = cfg.port || 22;
                 mediaBwlimitEl.value = cfg.bwlimit_kbps || '';
-                // 0 is a valid margin — only fall back to blank (placeholder
-                // shows the default) when the key is absent.
-                mediaMarginEl.value = cfg.space_margin_percent ?? '';
+                // 0 is a valid margin — only fall back to the default when the
+                // key is absent. This value becomes each drive field's
+                // placeholder (the "blank uses…" default).
+                savedGlobalMargin = cfg.space_margin_percent ?? 8;
                 renderFolders(cfg.folders);
                 savedDriveMargins = cfg.drive_margins || {};
                 // Saved overrides show immediately; the SSH probe fills in
@@ -682,12 +682,6 @@
                 showMediaError('Copy speed limit must be a non-negative number (KB/s).');
                 return;
             }
-            const marginRaw = mediaMarginEl.value.trim();
-            const margin = marginRaw === '' ? 8 : parseInt(marginRaw, 10);
-            if (Number.isNaN(margin) || margin < 0 || margin > 50) {
-                showMediaError('Free space margin must be a whole number between 0 and 50 (%).');
-                return;
-            }
             const drive_margins = collectDriveMargins();
             if (drive_margins === null) return;
             const body = {
@@ -695,7 +689,7 @@
                 host: mediaHostEl.value.trim(),
                 port: parseInt(mediaPortEl.value, 10) || 22,
                 bwlimit_kbps: bwlimit,
-                space_margin_percent: margin,
+                space_margin_percent: savedGlobalMargin,
                 drive_margins,
                 folders,
                 library_refresh,
