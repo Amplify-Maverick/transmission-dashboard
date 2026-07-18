@@ -113,6 +113,13 @@
                     <div class="meter">
                         <div class="meter-fill" id="cpu-bar" style="width: 0%"></div>
                     </div>
+                    <div class="metric-row" id="cpu-temp-row" hidden>
+                        <span class="metric-label">Temperature</span>
+                        <span class="metric-value" id="cpu-temp">—</span>
+                    </div>
+                    <div class="meter" id="cpu-temp-meter" hidden>
+                        <div class="meter-fill" id="cpu-temp-bar" style="width: 0%"></div>
+                    </div>
                     <div class="metric-grid">
                         <div class="metric-cell">
                             <span class="metric-cell-label">Load 1m</span>
@@ -367,6 +374,40 @@
             return `Booted ${d.toLocaleString()}`;
         }
 
+        function fmtTemp(c) {
+            if (c == null || isNaN(c)) return '—';
+            return `${c.toFixed(1)}°C`;
+        }
+
+        function renderCpuTemp(temp) {
+            const row = document.getElementById('cpu-temp-row');
+            const meter = document.getElementById('cpu-temp-meter');
+            // No thermal sensor on this host — keep the row hidden entirely
+            // rather than showing a permanent dash.
+            if (!temp || temp.current == null) {
+                row.hidden = true;
+                meter.hidden = true;
+                return;
+            }
+            row.hidden = false;
+            meter.hidden = false;
+            const label = temp.label ? ` (${temp.label})` : '';
+            document.getElementById('cpu-temp').textContent = fmtTemp(temp.current) + label;
+            // Scale the bar against the critical threshold when the sensor
+            // reports one, else high, else a 100°C ceiling.
+            const ceiling = temp.critical || temp.high || 100;
+            const bar = document.getElementById('cpu-temp-bar');
+            bar.style.width = `${Math.max(0, Math.min(100, (temp.current / ceiling) * 100))}%`;
+            let state = 'ok';
+            if (temp.critical && temp.current >= temp.critical) state = 'crit';
+            else if (temp.high && temp.current >= temp.high) state = 'warn';
+            else if (!temp.high && !temp.critical) {
+                if (temp.current >= 85) state = 'crit';
+                else if (temp.current >= 70) state = 'warn';
+            }
+            bar.dataset.state = state;
+        }
+
         function setBar(id, percent) {
             const el = document.getElementById(id);
             if (!el) return;
@@ -389,6 +430,7 @@
                 ? `${logical} threads · ${physical} cores`
                 : `${logical} ${logical === 1 ? 'core' : 'cores'}`;
             document.getElementById('cpu-sub').textContent = cpuSub;
+            renderCpuTemp(cpu.temp);
             const [l1, l5, l15] = cpu.load_avg || [0, 0, 0];
             document.getElementById('load-1').textContent = l1.toFixed(2);
             document.getElementById('load-5').textContent = l5.toFixed(2);

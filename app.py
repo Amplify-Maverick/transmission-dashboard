@@ -1600,6 +1600,59 @@ def _net_rates():
         return cur, rx_rate, tx_rate
 
 
+# Sensor chips that report the CPU package/core temperature, most specific
+# first. Intel exposes "coretemp", AMD "k10temp", the Raspberry Pi (where
+# this runs in production) "cpu_thermal". We fall back to the first sensor
+# with any reading if none of the known chips are present.
+_CPU_TEMP_CHIPS = ("coretemp", "k10temp", "cpu_thermal", "acpitz", "zenpower")
+
+
+def _cpu_temp():
+    """Best-effort current CPU temperature in °C, plus its high/critical
+    thresholds when the sensor advertises them. Returns None when the host
+    exposes no thermal sensors (common on VMs and some Pis without the
+    kernel module loaded)."""
+    sensors = getattr(psutil, "sensors_temperatures", None)
+    if sensors is None:
+        return None
+    try:
+        temps = sensors() or {}
+    except Exception:
+        return None
+    if not temps:
+        return None
+
+    def _pick(entries):
+        # Prefer a "Package"/"Tctl" label (the whole-die reading) over an
+        # individual core; otherwise just take the first entry.
+        for e in entries:
+            label = (e.label or "").lower()
+            if "package" in label or "tctl" in label or "composite" in label:
+                return e
+        return entries[0] if entries else None
+
+    chosen = None
+    for chip in _CPU_TEMP_CHIPS:
+        if temps.get(chip):
+            chosen = _pick(temps[chip])
+            break
+    if chosen is None:
+        # Fall back to any chip that reported a numeric current reading.
+        for entries in temps.values():
+            picked = _pick(entries)
+            if picked is not None and picked.current is not None:
+                chosen = picked
+                break
+    if chosen is None or chosen.current is None:
+        return None
+    return {
+        "current": round(chosen.current, 1),
+        "high": chosen.high if chosen.high else None,
+        "critical": chosen.critical if chosen.critical else None,
+        "label": chosen.label or None,
+    }
+
+
 _disk_target_cache = {"at": 0.0, "path": "/"}
 _DISK_TARGET_TTL = 60.0
 
@@ -1911,6 +1964,7 @@ def api_system():
                 "count": psutil.cpu_count(logical=True) or 0,
                 "count_physical": psutil.cpu_count(logical=False) or 0,
                 "load_avg": [load1, load5, load15],
+                "temp": _cpu_temp(),
             },
             "memory": {
                 "total": vm.total,
