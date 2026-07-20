@@ -497,6 +497,59 @@ def _remote_df_multi(user, host, port, paths):
     return out
 
 
+def _remote_verify_paths(user, host, port, paths, timeout=30):
+    """Confirm each remote path exists after a copy; return summed apparent
+    bytes (as `du -b` reports them).
+
+    rsync exiting 0 only proves the bytes left this host successfully — it
+    can't tell us the destination was the drive the media server actually
+    reads from (e.g. an unmounted mountpoint). A single `du` round-trip over
+    the expected destination paths catches a "success" that left nothing
+    behind before we mark the copy done or delete the local data.
+
+    Returns None when verification couldn't run (e.g. `du` isn't installed on
+    the remote) so the caller can skip rather than fail a good copy. Raises
+    RuntimeError when the remote is reachable but a path is missing, or ssh
+    itself fails — cases where we'd rather not trust the copy.
+    """
+    if not paths:
+        return 0
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    # `du -scb`: -s summarize each arg, -c print a grand-total line, -b use
+    # apparent size in bytes. du exits non-zero (and names the path on stderr)
+    # for any operand that doesn't exist — that's our existence check.
+    try:
+        r = subprocess.run(
+            ["ssh",
+             "-o", "BatchMode=yes",
+             "-o", "ConnectTimeout=10",
+             "-o", "StrictHostKeyChecking=accept-new",
+             "-p", str(port), f"{user}@{host}",
+             f"du -scb -- {quoted}"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ssh timed out verifying remote copy")
+    except FileNotFoundError:
+        raise RuntimeError("ssh client is not installed on this host")
+    stderr_txt = (r.stderr or "").strip()
+    # du missing on the remote is an environment issue, not a bad copy —
+    # skip verification rather than fail every copy to this host.
+    if r.returncode == 127 or "command not found" in stderr_txt.lower():
+        return None
+    if r.returncode != 0:
+        raise RuntimeError(stderr_txt[:200] or f"du exit {r.returncode}")
+    total = 0
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[-1].strip() == "total":
+            try:
+                total = int(parts[0])
+            except ValueError:
+                pass
+    return total
+
+
 def _trigger_library_refresh(cfg, folder, tid=None, torrent_name=None):
     """Fire-and-forget Plex/Jellyfin library refresh after a successful copy.
 
@@ -855,6 +908,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
     # the config-wide value) is resolved inside each preflight block below,
     # once df has told us which drive dest_root actually lives on.
 
+    # Expected remote destination paths, filled in per branch below, and the
+    # source byte total we expect to find there — used by the post-copy
+    # existence check (_remote_verify_paths) once rsync reports success.
+    verify_targets = []
+    verify_expected = preflight_bytes
+
     if media_type == "show" and season_groups:
         # Multi-season: each detected season copies into its own
         # Season NN/ subfolder under the show root. The single-pass
@@ -881,6 +940,11 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         rsync_target = f"{user}@{host}:{final_dest_path}/"
         remote_mkdir = final_dest_path
         source = None
+        # Each video lands in final_dest_path/ under its own basename.
+        verify_targets = [
+            f"{final_dest_path}/{os.path.basename(s.rstrip('/'))}"
+            for s in sources
+        ]
     else:
         source = sources[0]
         is_dir = os.path.isdir(source)
@@ -915,6 +979,14 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
             rsync_target = f"{user}@{host}:{final_dest_path}/"
             remote_mkdir = final_dest_path
         rsync_sources = [rsync_source]
+        # With a rename the source lands exactly at final_dest_path; without
+        # one, rsync preserves the source basename inside final_dest_path/.
+        if rename:
+            verify_targets = [final_dest_path]
+        else:
+            verify_targets = [
+                f"{final_dest_path}/{os.path.basename(source.rstrip('/'))}"
+            ]
 
     update_copy_entry(
         tid,
@@ -933,6 +1005,32 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
         deleted=False,
         tailscale_auth_url=None,
     )
+
+    def verify_remote_copy():
+        """Post-copy existence check. Returns an error message when the remote
+        copy can't be confirmed, or None when it's confirmed (or skipped)."""
+        if not verify_targets:
+            return None
+        try:
+            remote_bytes = _remote_verify_paths(user, host, port, verify_targets)
+        except RuntimeError as e:
+            return f"post-copy verification failed: {e}"
+        if remote_bytes is None:
+            db.log_event(
+                "copy.verify_skipped", "warn",
+                "Post-copy verification skipped ('du' unavailable on remote)",
+                torrent_id=tid, torrent_name=torrent_name,
+            )
+            return None
+        # du's apparent size is >= the summed source file sizes (directory
+        # entries add a little), so a remote total below the source total
+        # means files are missing or truncated. Allow 2% slack for safety.
+        if verify_expected > 0 and remote_bytes < int(verify_expected * 0.98):
+            return (
+                f"post-copy verification failed: remote destination holds "
+                f"{remote_bytes} bytes, expected ~{verify_expected}"
+            )
+        return None
 
     try:
         if media_type == "show" and season_groups:
@@ -1013,6 +1111,10 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                 season = grp["season"]
                 files = list(grp["sources"])
                 remote_dir = f"{show_root_remote}/Season {season}"
+                verify_targets.extend(
+                    f"{remote_dir}/{os.path.basename(f.rstrip('/'))}"
+                    for f in files
+                )
 
                 try:
                     quoted = shlex.quote(remote_dir)
@@ -1142,6 +1244,19 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                     return
 
                 cumulative_bytes += grp_size
+
+            verify_err = verify_remote_copy()
+            if verify_err:
+                db.log_event(
+                    "copy.verify_failed", "error", verify_err,
+                    torrent_id=tid, torrent_name=torrent_name,
+                    details={"targets": verify_targets, "host": host},
+                )
+                update_copy_entry(
+                    tid, status="error", finished_at=_now_iso(),
+                    error_message=verify_err[:1000],
+                )
+                return
 
             update_copy_entry(
                 tid, status="done", progress_pct=100, eta_seconds=0,
@@ -1350,6 +1465,18 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
             return
 
         if rc == 0:
+            verify_err = verify_remote_copy()
+            if verify_err:
+                db.log_event(
+                    "copy.verify_failed", "error", verify_err,
+                    torrent_id=tid, torrent_name=torrent_name,
+                    details={"targets": verify_targets, "host": host},
+                )
+                update_copy_entry(
+                    tid, status="error", finished_at=_now_iso(),
+                    error_message=verify_err[:1000],
+                )
+                return
             update_copy_entry(
                 tid,
                 status="done",
