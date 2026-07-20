@@ -70,6 +70,42 @@
                     </p>
                 </header>
 
+                <details class="field-details">
+                    <summary>Can't connect? Setting up SSH access to a new server</summary>
+                    <div class="field-details-body">
+                        <p>
+                            An error like
+                            <code>user@100.64.1.5: Permission denied (publickey,password)</code>
+                            means the network is fine — SSH reached the server — but it rejected the login. That's
+                            a credentials problem, not connectivity. Work through these:
+                        </p>
+                        <ul>
+                            <li>
+                                <strong>Check the username.</strong> The <em>User</em> field must be a real account on
+                                the media server (e.g. the OS default or the one you created during install), not a
+                                placeholder like <code>user</code>.
+                            </li>
+                            <li>
+                                <strong>Install this host's key on the server.</strong> Publickey fails until the new
+                                server has this host's public key. From this host, run once:
+                                <code>ssh-copy-id user@100.64.1.5</code> &mdash; it prompts for the password, then
+                                appends the key to <code>~/.ssh/authorized_keys</code>. Key auth works after that.
+                            </li>
+                            <li>
+                                <strong>If the password is also rejected</strong>, either it's the wrong
+                                user/password, or the server has <code>PasswordAuthentication no</code> in its sshd
+                                config. In that case <code>ssh-copy-id</code> can't bootstrap &mdash; add this host's
+                                key another way (console/keyboard access, or the server's own admin UI).
+                            </li>
+                            <li>
+                                <strong>Tailscale/CGNAT note:</strong> addresses in <code>100.64.0.0/10</code> are
+                                Tailscale IPs. Make sure the new server is actually on your tailnet and reachable
+                                (<code>tailscale ping</code>) before assuming an auth problem.
+                            </li>
+                        </ul>
+                    </div>
+                </details>
+
                 <div class="form-error" id="media-error" hidden></div>
                 <div class="form-error" id="media-tailscale-auth" hidden>
                     Tailscale needs to be re-authenticated. Open
@@ -468,7 +504,12 @@
             return Math.round(bytes / GB) + ' GB';
         }
 
-        function buildDriveRow(mountpoint, meta, marginPercent) {
+        // Mountpoints the user removed this session (stale overrides from an
+        // old server). Kept so a background re-detect can't resurrect them
+        // before the next save writes them out of the config.
+        const deletedDriveMounts = new Set();
+
+        function buildDriveRow(mountpoint, meta, marginPercent, deletable = false) {
             const row = document.createElement('div');
             row.className = 'media-drive-row';
             row.dataset.mountpoint = mountpoint;
@@ -495,6 +536,23 @@
             input.addEventListener('input', clearMediaBanner);
             row.appendChild(info);
             row.appendChild(input);
+            if (deletable) {
+                const del = document.createElement('button');
+                del.type = 'button';
+                del.className = 'btn btn-sm media-drive-remove';
+                del.setAttribute('aria-label', 'Remove drive ' + mountpoint);
+                del.title = 'Remove this drive (from an old server) — takes effect when you save';
+                del.innerHTML = '&times;';
+                del.addEventListener('click', () => {
+                    deletedDriveMounts.add(mountpoint);
+                    row.remove();
+                    if (!mediaDrivesEl.querySelector('.media-drive-row')) {
+                        renderDrives([], collectDriveMargins() || {});
+                    }
+                    clearMediaBanner();
+                });
+                row.appendChild(del);
+            }
             return row;
         }
 
@@ -515,11 +573,12 @@
                 ));
             });
             // Saved overrides for drives the probe didn't see (offline USB
-            // disk, changed paths) stay visible and editable.
+            // disk, changed paths, or a former server) stay visible and
+            // editable, with a delete button so stale ones can be removed.
             Object.keys(m).forEach(mp => {
-                if (seen.has(mp)) return;
+                if (seen.has(mp) || deletedDriveMounts.has(mp)) return;
                 mediaDrivesEl.appendChild(buildDriveRow(
-                    mp, 'not detected — drive offline?', m[mp]
+                    mp, 'not detected — drive offline?', m[mp], true
                 ));
             });
             if (!mediaDrivesEl.children.length) {
@@ -658,6 +717,7 @@
                 // placeholder (the "blank uses…" default).
                 savedGlobalMargin = cfg.space_margin_percent ?? 8;
                 renderFolders(cfg.folders);
+                deletedDriveMounts.clear();
                 savedDriveMargins = cfg.drive_margins || {};
                 // Saved overrides show immediately; the SSH probe fills in
                 // the rest in the background (quiet — an unreachable media
@@ -747,6 +807,7 @@
                     throw new Error((data && data.error) || ('HTTP ' + res.status));
                 }
                 savedDriveMargins = drive_margins;
+                deletedDriveMounts.clear();
                 toast('Media destination saved', 'success');
             } catch (err) {
                 showMediaError('Save failed: ' + err.message);

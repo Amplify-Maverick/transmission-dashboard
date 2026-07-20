@@ -2687,7 +2687,7 @@ body.select-mode-right .torrent-list {
 
 .media-drive-row {
     display: grid;
-    grid-template-columns: 1fr 90px;
+    grid-template-columns: 1fr 90px auto;
     gap: 8px;
     align-items: center;
 }
@@ -2710,7 +2710,8 @@ body.select-mode-right .torrent-list {
     font-size: 12px;
 }
 
-.media-folder-remove {
+.media-folder-remove,
+.media-drive-remove {
     padding: 4px 10px;
     line-height: 1;
 }
