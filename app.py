@@ -550,30 +550,41 @@ def _remote_verify_paths(user, host, port, paths, timeout=30):
     return total
 
 
+def _glob_escape(s):
+    """Escape glob metacharacters so a literal name is matched verbatim by
+    find's -iname pattern (which is a shell glob, not a regex)."""
+    return re.sub(r"([\\*?\[])", r"\\\1", s)
+
+
 def _remote_check_presence(user, host, port, exact_paths, roots, names,
-                           timeout=30):
+                           depth=2, timeout=30):
     """Is a torrent's copied content present on the media server?
 
     Two strategies in one SSH round-trip:
       1. exact_paths — the real per-item destination paths recorded at copy
          time (new copies). Present if all of them exist.
       2. roots + names — the configured library folders and the item's
-         candidate on-disk names. Present if any folder contains a child
-         (depth 1-2) whose name matches, case-insensitively. This is what
-         makes the check survive a server switch: it looks under the folders
-         from Settings by name, not at whatever absolute path was saved when
-         the copy first ran.
+         candidate on-disk names. Present if any folder holds an entry
+         (within `depth` levels) whose name matches, case-insensitively. This
+         is what lets the check survive a server switch: it searches the
+         folders from Settings by name, not whatever absolute path was saved
+         when the copy first ran.
 
-    Returns True (present), False (searched, not found), or None when we
-    couldn't run the check at all (nothing to look for, or host unreachable)
-    — the caller treats None as "unknown" so a transient failure or a stale
+    Only portable find primaries (-iname/-maxdepth) are used — no GNU-only
+    -printf — so it works against Linux, BSD/macOS, and busybox/NAS servers.
+
+    Returns (present, debug):
+      present = True / False / None (None = couldn't run: nothing to look for,
+                host unreachable, or the remote produced no verdict).
+      debug   = short string for logging (stderr snippet or note).
+    The caller treats None as "unknown" so a transient failure or a stale
     record never reads as a confirmed loss.
     """
     exact_paths = [p for p in (exact_paths or []) if p]
     roots = [r for r in (roots or []) if r]
     names = [n for n in (names or []) if n]
     if not exact_paths and not (roots and names):
-        return None
+        return None, "nothing to check"
 
     lines = []
     if exact_paths:
@@ -583,13 +594,17 @@ def _remote_check_presence(user, host, port, exact_paths, roots, names,
         lines.append('if [ "$__ok" = 1 ]; then echo __PRESENT__; exit 0; fi')
     if roots and names:
         rq = " ".join(shlex.quote(r) for r in roots)
-        ng = " ".join("-e " + shlex.quote(n) for n in names)
-        # -printf '%f' prints just the basename; grep -Fx matches it exactly
-        # (fixed-string, whole-line) so names with [], (), etc. aren't treated
-        # as globs/regex.
+        iname_expr = " -o ".join(
+            "-iname " + shlex.quote(_glob_escape(n)) for n in names)
+        # find -iname is portable (GNU/BSD/busybox); head closes the pipe on
+        # the first hit so a match returns fast. Only find's stdout (matched
+        # paths) counts as present; its stderr flows through to ssh stderr so
+        # a broken find or a missing root surfaces for diagnosis without ever
+        # being mistaken for a match.
         lines.append(
-            f"if find {rq} -mindepth 1 -maxdepth 2 -printf '%f\\n' 2>/dev/null "
-            f"| grep -qiFx {ng}; then echo __PRESENT__; exit 0; fi"
+            f'if [ -n "$(find {rq} -maxdepth {int(depth)} '
+            f'\\( {iname_expr} \\) | head -n 1)" ]; '
+            f'then echo __PRESENT__; exit 0; fi'
         )
     lines.append("echo __MISSING__")
     remote_cmd = "\n".join(lines)
@@ -603,14 +618,15 @@ def _remote_check_presence(user, host, port, exact_paths, roots, names,
              "-p", str(port), f"{user}@{host}", remote_cmd],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return None, f"ssh failed: {e}"
     out = (r.stdout or "").strip()
+    err = (r.stderr or "").strip()
     if out.endswith("__PRESENT__"):
-        return True
+        return True, err
     if out.endswith("__MISSING__"):
-        return False
-    return None
+        return False, err
+    return None, (err or out or "no verdict from remote")[:300]
 
 
 def _trigger_library_refresh(cfg, folder, tid=None, torrent_name=None):
@@ -3937,18 +3953,36 @@ def api_copy_check(tid):
             "dest_path": dest_path, "host": host,
         })
 
-    present = _remote_check_presence(
-        user, host, port, exact_paths, roots, sorted(names))
+    name_list = sorted(names)
+    present, debug = _remote_check_presence(
+        user, host, port, exact_paths, roots, name_list)
+    # Diagnostics echoed back so a wrong verdict can be traced (what names /
+    # folders were searched, and any stderr the remote find emitted).
+    diag = {"names": name_list, "roots": roots,
+            "exact": exact_paths, "detail": debug or ""}
     if present is None:
+        db.log_event(
+            "copy.check.unknown", "warn",
+            f"Copied-check couldn't verify torrent {tid}: {debug}",
+            torrent_id=tid, details=diag,
+        )
         return jsonify({
             "ok": True, "id": tid, "state": "unknown",
-            "reason": "media server could not be reached",
-            "dest_path": dest_path, "host": host,
+            "reason": "media server could not be reached or gave no answer",
+            "dest_path": dest_path, "host": host, "diag": diag,
         })
+    if debug:
+        # A verdict came back but find also wrote to stderr (e.g. a configured
+        # folder doesn't exist on this server) — worth recording.
+        db.log_event(
+            "copy.check.stderr", "info",
+            f"Copied-check stderr for torrent {tid}: {debug}",
+            torrent_id=tid, details=diag,
+        )
     return jsonify({
         "ok": True, "id": tid,
         "state": "present" if present else "missing",
-        "dest_path": dest_path, "host": host,
+        "dest_path": dest_path, "host": host, "diag": diag,
     })
 
 
