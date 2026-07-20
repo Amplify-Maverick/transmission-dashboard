@@ -550,18 +550,50 @@ def _remote_verify_paths(user, host, port, paths, timeout=30):
     return total
 
 
-def _remote_path_exists(user, host, port, path, timeout=20):
-    """Whether `path` exists on the remote host.
+def _remote_check_presence(user, host, port, exact_paths, roots, names,
+                           timeout=30):
+    """Is a torrent's copied content present on the media server?
 
-    Returns True/False when the SSH check completes, or None when we couldn't
-    determine it (host unreachable, ssh/auth failure, timeout) — the caller
-    treats None as "unknown" rather than "missing" so a transient network
-    problem never looks like a lost copy.
+    Two strategies in one SSH round-trip:
+      1. exact_paths — the real per-item destination paths recorded at copy
+         time (new copies). Present if all of them exist.
+      2. roots + names — the configured library folders and the item's
+         candidate on-disk names. Present if any folder contains a child
+         (depth 1-2) whose name matches, case-insensitively. This is what
+         makes the check survive a server switch: it looks under the folders
+         from Settings by name, not at whatever absolute path was saved when
+         the copy first ran.
+
+    Returns True (present), False (searched, not found), or None when we
+    couldn't run the check at all (nothing to look for, or host unreachable)
+    — the caller treats None as "unknown" so a transient failure or a stale
+    record never reads as a confirmed loss.
     """
-    quoted = shlex.quote(path)
-    # test -e succeeds/fails on existence; the echo makes ssh exit 0 either
-    # way so a non-zero exit unambiguously means "couldn't run the check".
-    remote_cmd = f"test -e {quoted} && echo __EXISTS__ || echo __MISSING__"
+    exact_paths = [p for p in (exact_paths or []) if p]
+    roots = [r for r in (roots or []) if r]
+    names = [n for n in (names or []) if n]
+    if not exact_paths and not (roots and names):
+        return None
+
+    lines = []
+    if exact_paths:
+        quoted = " ".join(shlex.quote(p) for p in exact_paths)
+        lines.append("__ok=1")
+        lines.append(f'for __p in {quoted}; do [ -e "$__p" ] || __ok=0; done')
+        lines.append('if [ "$__ok" = 1 ]; then echo __PRESENT__; exit 0; fi')
+    if roots and names:
+        rq = " ".join(shlex.quote(r) for r in roots)
+        ng = " ".join("-e " + shlex.quote(n) for n in names)
+        # -printf '%f' prints just the basename; grep -Fx matches it exactly
+        # (fixed-string, whole-line) so names with [], (), etc. aren't treated
+        # as globs/regex.
+        lines.append(
+            f"if find {rq} -mindepth 1 -maxdepth 2 -printf '%f\\n' 2>/dev/null "
+            f"| grep -qiFx {ng}; then echo __PRESENT__; exit 0; fi"
+        )
+    lines.append("echo __MISSING__")
+    remote_cmd = "\n".join(lines)
+
     try:
         r = subprocess.run(
             ["ssh",
@@ -574,7 +606,7 @@ def _remote_path_exists(user, host, port, path, timeout=20):
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
     out = (r.stdout or "").strip()
-    if out.endswith("__EXISTS__"):
+    if out.endswith("__PRESENT__"):
         return True
     if out.endswith("__MISSING__"):
         return False
@@ -1292,6 +1324,7 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
             update_copy_entry(
                 tid, status="done", progress_pct=100, eta_seconds=0,
                 bytes_transferred=cumulative_bytes, finished_at=_now_iso(),
+                dest_targets=list(verify_targets),
             )
             if delete_after:
                 try:
@@ -1514,6 +1547,7 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                 progress_pct=100,
                 eta_seconds=0,
                 finished_at=_now_iso(),
+                dest_targets=list(verify_targets),
             )
             if delete_after:
                 try:
@@ -3860,18 +3894,52 @@ def api_copy_check(tid):
     if not host or not user:
         return _err("media destination is not configured", 400)
     port = int(cfg.get("port") or 22)
+    roots = [p for p in ((f.get("path") or "").strip()
+                         for f in (cfg.get("folders") or [])) if p]
 
     entry = load_copy_state().get(str(tid)) or {}
     dest_path = entry.get("dest_path")
-    if not dest_path:
+    # Real per-item paths, recorded at copy time for new copies. Old copies
+    # (pre-this-feature, or copied to the previous server) won't have them, so
+    # we fall back to searching the configured folders by name.
+    exact_paths = entry.get("dest_targets") or []
+
+    # Candidate on-disk names to search for under the library folders:
+    #  - the torrent's name (what a no-rename copy lands as),
+    #  - the recorded destination leaf (what a renamed copy lands as),
+    #  - that leaf with a trailing " [Seasons 1, 2]" label stripped (the show
+    #    folder for a multi-season copy, whose dest_path is only a label).
+    names = set()
+    try:
+        detail = client.get_torrent_detail(tid)
+    except Exception:
+        detail = None
+    if detail and detail.get("name"):
+        names.add(detail["name"])
+    if dest_path:
+        leaf = os.path.basename(dest_path.rstrip("/"))
+        if leaf:
+            names.add(leaf)
+            stripped = re.sub(r"\s*\[Seasons?\b[^\]]*\]\s*$", "", leaf).strip()
+            if stripped:
+                names.add(stripped)
+
+    if not exact_paths and not names:
         return jsonify({
             "ok": True, "id": tid, "state": "unknown",
-            "reason": "no destination path on record", "dest_path": None,
+            "reason": "nothing on record to check", "dest_path": dest_path,
             "host": host,
         })
+    if not exact_paths and not roots:
+        return jsonify({
+            "ok": True, "id": tid, "state": "unknown",
+            "reason": "no library folders configured in Settings",
+            "dest_path": dest_path, "host": host,
+        })
 
-    exists = _remote_path_exists(user, host, port, dest_path)
-    if exists is None:
+    present = _remote_check_presence(
+        user, host, port, exact_paths, roots, sorted(names))
+    if present is None:
         return jsonify({
             "ok": True, "id": tid, "state": "unknown",
             "reason": "media server could not be reached",
@@ -3879,7 +3947,7 @@ def api_copy_check(tid):
         })
     return jsonify({
         "ok": True, "id": tid,
-        "state": "present" if exists else "missing",
+        "state": "present" if present else "missing",
         "dest_path": dest_path, "host": host,
     })
 
