@@ -1491,6 +1491,134 @@ body.select-mode-right .torrent-list {
     padding-bottom: 84px;
 }
 
+/* ---------- copied-state check ---------- */
+
+/* Bottom progress bar for the whole check task (single or bulk). */
+.check-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 86;
+    background: var(--panel);
+    border-top: 1px solid var(--border-strong);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.check-bar[hidden] { display: none; }
+
+.check-bar-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.check-bar-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+}
+
+.check-bar-title {
+    font-size: 13px;
+    color: var(--text-strong);
+}
+
+.check-bar-count {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.check-bar-progress {
+    height: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.check-bar-fill {
+    height: 100%;
+    width: 0;
+    background: var(--blue);
+    transition: width 0.3s ease;
+}
+
+.check-bar-summary {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.check-bar-summary[hidden] { display: none; }
+
+.check-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+/* Per-card indicator shown while a card is being checked / after its result.
+   Owned by the check flow, so it survives the normal card repaint. */
+.card-check-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.card-check-status[hidden] { display: none; }
+
+.card-check-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--grey);
+    flex-shrink: 0;
+}
+
+.card[data-check="checking"] .card-check-status-dot {
+    background: var(--yellow);
+    animation: pulse-yellow 1.6s infinite;
+}
+
+.card[data-check="checking"] .card-check-status-text { color: var(--yellow); }
+
+.card[data-check="present"] .card-check-status-dot { background: var(--green); }
+.card[data-check="present"] .card-check-status-text { color: var(--green); }
+
+.card[data-check="missing"] .card-check-status-dot { background: var(--red); }
+.card[data-check="missing"] .card-check-status-text { color: var(--red); }
+
+.card[data-check="unknown"] .card-check-status-dot { background: var(--grey); }
+
+/* Ring the card being checked / showing a result so it stands out. */
+.card[data-check] { box-shadow: inset 3px 0 0 var(--yellow); }
+.card[data-check="present"] { box-shadow: inset 3px 0 0 var(--green); }
+.card[data-check="missing"] { box-shadow: inset 3px 0 0 var(--red); }
+
+/* Keep list clear of the check bar the same way select mode does. */
+body.checking .torrent-list { padding-bottom: 96px; }
+
+@media (max-width: 820px) {
+    .check-bar {
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        padding-bottom: 10px;
+    }
+    body.checking .torrent-list {
+        padding-bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+    }
+}
+
 /* ---------- toast ---------- */
 
 .toast-container {

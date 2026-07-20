@@ -550,6 +550,37 @@ def _remote_verify_paths(user, host, port, paths, timeout=30):
     return total
 
 
+def _remote_path_exists(user, host, port, path, timeout=20):
+    """Whether `path` exists on the remote host.
+
+    Returns True/False when the SSH check completes, or None when we couldn't
+    determine it (host unreachable, ssh/auth failure, timeout) — the caller
+    treats None as "unknown" rather than "missing" so a transient network
+    problem never looks like a lost copy.
+    """
+    quoted = shlex.quote(path)
+    # test -e succeeds/fails on existence; the echo makes ssh exit 0 either
+    # way so a non-zero exit unambiguously means "couldn't run the check".
+    remote_cmd = f"test -e {quoted} && echo __EXISTS__ || echo __MISSING__"
+    try:
+        r = subprocess.run(
+            ["ssh",
+             "-o", "BatchMode=yes",
+             "-o", "ConnectTimeout=10",
+             "-o", "StrictHostKeyChecking=accept-new",
+             "-p", str(port), f"{user}@{host}", remote_cmd],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    out = (r.stdout or "").strip()
+    if out.endswith("__EXISTS__"):
+        return True
+    if out.endswith("__MISSING__"):
+        return False
+    return None
+
+
 def _trigger_library_refresh(cfg, folder, tid=None, torrent_name=None):
     """Fire-and-forget Plex/Jellyfin library refresh after a successful copy.
 
@@ -3807,6 +3838,90 @@ def api_copy_status(tid):
 @login_required
 def api_copy_states():
     return jsonify(load_copy_state())
+
+
+@app.route("/api/torrent/<int:tid>/copy/check")
+@login_required
+def api_copy_check(tid):
+    """Check whether this torrent's recorded copy still exists on the
+    currently-configured media server.
+
+    Uses the destination path saved in copy_state (from when it was copied)
+    but probes the *current* config's host/user/port — so after a server
+    switch this reports what's actually present on the new box, not the old
+    one. Read-only: state is only changed later via /copy/set-copied.
+
+    Returns state = present | missing | unknown, where unknown means either
+    no destination was on record or the server couldn't be reached.
+    """
+    cfg = _read_media_config()
+    host = (cfg.get("host") or "").strip()
+    user = (cfg.get("user") or "").strip()
+    if not host or not user:
+        return _err("media destination is not configured", 400)
+    port = int(cfg.get("port") or 22)
+
+    entry = load_copy_state().get(str(tid)) or {}
+    dest_path = entry.get("dest_path")
+    if not dest_path:
+        return jsonify({
+            "ok": True, "id": tid, "state": "unknown",
+            "reason": "no destination path on record", "dest_path": None,
+            "host": host,
+        })
+
+    exists = _remote_path_exists(user, host, port, dest_path)
+    if exists is None:
+        return jsonify({
+            "ok": True, "id": tid, "state": "unknown",
+            "reason": "media server could not be reached",
+            "dest_path": dest_path, "host": host,
+        })
+    return jsonify({
+        "ok": True, "id": tid,
+        "state": "present" if exists else "missing",
+        "dest_path": dest_path, "host": host,
+    })
+
+
+@app.route("/api/torrent/<int:tid>/copy/set-copied", methods=["POST"])
+@login_required
+def api_copy_set_copied(tid):
+    """Reconcile a torrent's stored 'copied' state with reality after a check.
+
+    body: {"copied": true|false}. Adds/removes the 'Copied' label and flips
+    copy_state so the card settles on the right lifecycle state — used when
+    the user clicks Okay on a check result that disagrees with what we had
+    on record (e.g. a copy that didn't survive a media-server switch).
+    """
+    data = request.get_json(silent=True) or {}
+    copied = bool(data.get("copied"))
+    try:
+        detail = client.get_torrent_detail(tid)
+        existing = list(detail.get("labels") or []) if detail else []
+    except Exception as e:
+        return _err(e)
+
+    if copied:
+        if COPIED_LABEL not in existing:
+            try:
+                client.set_labels(tid, existing + [COPIED_LABEL])
+            except Exception as e:
+                return _err(e)
+        update_copy_entry(tid, status="done", finished_at=_now_iso(),
+                          error_message=None)
+    else:
+        if COPIED_LABEL in existing:
+            try:
+                client.set_labels(
+                    tid, [l for l in existing if l != COPIED_LABEL])
+            except Exception as e:
+                return _err(e)
+        # Reset to idle (keeping dest_path for reference) so the card falls
+        # back to "ready to copy" instead of reading as done.
+        update_copy_entry(tid, status="idle", progress_pct=0,
+                          error_message=None)
+    return jsonify({"ok": True, "id": tid, "copied": copied})
 
 
 @app.route("/api/torrent/<int:tid>/copy/preflight")

@@ -136,6 +136,7 @@
         <button class="ctx-item" data-action="labels" type="button">Edit Labels</button>
         <div class="ctx-sep"></div>
         <button class="ctx-item" data-action="copy" type="button">Copy to media server…</button>
+        <button class="ctx-item" data-action="check-copy" type="button">Check copied file</button>
         <div class="ctx-sep"></div>
         <button class="ctx-item" data-action="verify" type="button">Verify Local Data</button>
         <div class="ctx-sep"></div>
@@ -348,10 +349,29 @@
             <button type="button" class="btn btn-sm" data-bulk="start">Start</button>
             <button type="button" class="btn btn-sm" data-bulk="stop">Stop</button>
             <button type="button" class="btn btn-sm" data-bulk="verify">Verify</button>
+            <button type="button" class="btn btn-sm" data-bulk="check">Check copied</button>
             <button type="button" class="btn btn-sm" data-bulk="unload">Unload</button>
             <button type="button" class="btn btn-sm" data-bulk="remove">Remove</button>
             <button type="button" class="btn btn-sm btn-danger" data-bulk="delete">Delete</button>
             <button type="button" class="btn btn-sm" id="bulk-cancel">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Copied-check progress bar (single or bulk media-server check) -->
+    <div class="check-bar" id="check-bar" hidden>
+        <div class="check-bar-body">
+            <div class="check-bar-top">
+                <span class="check-bar-title" id="check-bar-title">Checking media server…</span>
+                <span class="check-bar-count" id="check-bar-count"></span>
+            </div>
+            <div class="check-bar-progress">
+                <div class="check-bar-fill" id="check-bar-fill"></div>
+            </div>
+            <div class="check-bar-summary" id="check-bar-summary" hidden></div>
+        </div>
+        <div class="check-bar-actions">
+            <button type="button" class="btn btn-sm" id="check-cancel">Cancel</button>
+            <button type="button" class="btn btn-sm btn-primary" id="check-okay" hidden>Okay</button>
         </div>
     </div>
 
@@ -528,6 +548,10 @@
                         </div>
                         <div class="progress">
                             <div class="progress-fill"></div>
+                        </div>
+                        <div class="card-check-status" data-field="check-status" hidden>
+                            <span class="card-check-status-dot" aria-hidden="true"></span>
+                            <span class="card-check-status-text"></span>
                         </div>
                         <div class="card-error" data-field="error-box" hidden>
                             <span class="card-error-tag" data-field="error-tag"></span>
@@ -1678,6 +1702,9 @@
                 case 'copy':
                     openCopyModal(t);
                     break;
+                case 'check-copy':
+                    startCheck([t]);
+                    break;
                 case 'verify':
                     openConfirm({
                         title: 'Verify local data',
@@ -1880,6 +1907,11 @@
                         onConfirm: () => runBulk(targets, id => postJson(`/api/torrent/${id}/verify`), 'Verifying', 'Verify'),
                     });
                     break;
+                case 'check':
+                    // Read-only — no confirm. Keep the current selection so
+                    // the checked cards stay identifiable while it runs.
+                    startCheck(targets.slice());
+                    break;
                 case 'unload': {
                     // Only stopped torrents can be unloaded; filter here so
                     // the confirm dialog reflects what will actually happen.
@@ -1960,6 +1992,194 @@
             }
             updateBulkBar();
         }
+
+        // ----- check copied state against the media server -----
+
+        // One run at a time. Holds the targets, per-id findings, and flags.
+        let checkRun = null;
+
+        async function getJson(url) {
+            const res = await fetch(url, { cache: 'no-store' });
+            if (res.status === 401) {
+                unauthorizedRedirect();
+                throw new Error('Session expired');
+            }
+            let data = null;
+            try { data = await res.json(); } catch (_) {}
+            if (!res.ok || (data && data.ok === false)) {
+                throw new Error((data && data.error) || ('HTTP ' + res.status));
+            }
+            return data;
+        }
+
+        function isCardCopied(t) {
+            const labelsArr = Array.isArray(t.labels) ? t.labels : [];
+            const cs = copyStatesById.get(t.id);
+            return labelsArr.includes('Copied') || (cs && cs.status === 'done');
+        }
+
+        // Paint the per-card indicator. kind: 'checking' | 'present' |
+        // 'missing' | 'unknown' | null (clear). Owned entirely by the check
+        // flow — updateCard never touches [data-field="check-status"].
+        const CHECK_TEXT = {
+            checking: 'Checking media server…',
+            present: 'Copy found on server',
+            missing: 'Not on server',
+            unknown: 'Couldn’t check',
+        };
+        function setCardCheckStatus(id, kind, detail) {
+            const card = cardsById.get(id);
+            if (!card) return;
+            const el = card.querySelector('[data-field="check-status"]');
+            if (!el) return;
+            if (!kind) {
+                el.hidden = true;
+                card.removeAttribute('data-check');
+                return;
+            }
+            card.dataset.check = kind;
+            el.hidden = false;
+            el.querySelector('.card-check-status-text').textContent =
+                detail || CHECK_TEXT[kind] || '';
+        }
+
+        function checkBarEls() {
+            return {
+                bar: document.getElementById('check-bar'),
+                title: document.getElementById('check-bar-title'),
+                count: document.getElementById('check-bar-count'),
+                fill: document.getElementById('check-bar-fill'),
+                summary: document.getElementById('check-bar-summary'),
+                cancel: document.getElementById('check-cancel'),
+                okay: document.getElementById('check-okay'),
+            };
+        }
+
+        async function startCheck(targets) {
+            targets = (targets || []).filter(Boolean);
+            if (targets.length === 0) return;
+            if (checkRun && checkRun.running) {
+                toast('A copied-state check is already running', 'warn');
+                return;
+            }
+            checkRun = { targets, results: new Map(), cancelled: false, running: true };
+            const els = checkBarEls();
+            document.body.classList.add('checking');
+            els.bar.hidden = false;
+            els.okay.hidden = true;
+            els.cancel.hidden = false;
+            els.summary.hidden = true;
+            els.fill.style.width = '0%';
+
+            const n = targets.length;
+            for (let i = 0; i < n; i++) {
+                if (checkRun.cancelled) break;
+                const t = targets[i];
+                els.title.textContent = 'Checking media server…';
+                els.count.textContent = `${i + 1} / ${n}`;
+                setCardCheckStatus(t.id, 'checking');
+                let state = 'unknown', detail = '';
+                try {
+                    const data = await getJson(`/api/torrent/${t.id}/copy/check`);
+                    state = data.state || 'unknown';
+                    if (state === 'unknown') detail = data.reason || '';
+                } catch (err) {
+                    state = 'unknown';
+                    detail = err.message || '';
+                    if (/not configured/i.test(detail)) {
+                        // No point probing the rest — abort the whole run.
+                        checkRun.cancelled = true;
+                        toast('Media server is not configured', 'error');
+                        setCardCheckStatus(t.id, null);
+                        break;
+                    }
+                }
+                if (checkRun.cancelled) { setCardCheckStatus(t.id, null); break; }
+                checkRun.results.set(t.id, { state, detail });
+                setCardCheckStatus(t.id, state,
+                    state === 'unknown' && detail ? `Couldn’t check — ${detail}` : undefined);
+                els.fill.style.width = `${Math.round(((i + 1) / n) * 100)}%`;
+            }
+
+            checkRun.running = false;
+            if (checkRun.cancelled) { clearCheck(); return; }
+            finishCheck();
+        }
+
+        function finishCheck() {
+            const els = checkBarEls();
+            let present = 0, missing = 0, unknown = 0, changes = 0;
+            for (const t of checkRun.targets) {
+                const r = checkRun.results.get(t.id);
+                if (!r) { unknown++; continue; }
+                if (r.state === 'present') present++;
+                else if (r.state === 'missing') missing++;
+                else unknown++;
+                // A change is queued when reality disagrees with what we stored.
+                if (r.state === 'present' && !isCardCopied(t)) changes++;
+                else if (r.state === 'missing' && isCardCopied(t)) changes++;
+            }
+            els.title.textContent = 'Check complete';
+            els.count.textContent = '';
+            els.fill.style.width = '100%';
+            const parts = [];
+            parts.push(`${present} on server`);
+            parts.push(`${missing} missing`);
+            if (unknown) parts.push(`${unknown} unknown`);
+            els.summary.textContent = parts.join(' · ') +
+                (changes ? ` — Okay updates ${changes} card${changes === 1 ? '' : 's'}` : '');
+            els.summary.hidden = false;
+            els.cancel.hidden = true;
+            els.okay.hidden = false;
+            els.okay.disabled = false;
+        }
+
+        // Okay: persist the findings for cards whose stored state disagrees
+        // with what's actually on the server, then refresh and tidy up.
+        async function applyCheck() {
+            if (!checkRun) return;
+            const els = checkBarEls();
+            els.okay.disabled = true;
+            const jobs = [];
+            for (const t of checkRun.targets) {
+                const r = checkRun.results.get(t.id);
+                if (!r || r.state === 'unknown') continue;
+                const shouldBeCopied = r.state === 'present';
+                if (shouldBeCopied === Boolean(isCardCopied(t))) continue;
+                jobs.push(
+                    postJson(`/api/torrent/${t.id}/copy/set-copied`, { copied: shouldBeCopied })
+                        .catch(err => { console.warn('set-copied failed', t.id, err); })
+                );
+            }
+            await Promise.allSettled(jobs);
+            clearCheck();
+            exitSelectMode();
+            // Pull fresh copy state + torrents so the reconciled cards repaint.
+            pollCopyStates();
+            poll();
+            if (jobs.length) toast(`Updated ${jobs.length} card${jobs.length === 1 ? '' : 's'}`, 'success');
+        }
+
+        function clearCheck() {
+            const els = checkBarEls();
+            document.body.classList.remove('checking');
+            els.bar.hidden = true;
+            els.summary.hidden = true;
+            els.okay.hidden = true;
+            els.okay.disabled = false;
+            if (checkRun) {
+                for (const t of checkRun.targets) setCardCheckStatus(t.id, null);
+            }
+            checkRun = null;
+        }
+
+        function cancelCheck() {
+            if (checkRun) checkRun.cancelled = true;
+            clearCheck();
+        }
+
+        document.getElementById('check-cancel').addEventListener('click', cancelCheck);
+        document.getElementById('check-okay').addEventListener('click', applyCheck);
 
         async function doStart(id, t) {
             try {
