@@ -2661,7 +2661,12 @@ def api_metrics_seeding():
             "name": custom.get(h) or t.get("name") or h[:12],
             "bytes": rec.get(field) or 0,
             "peers": int(t.get("peersConnected") or 0),
+            # Lifetime counters straight from the daemon. Shown beside the
+            # windowed total so a zero can be read correctly: large lifetime
+            # means "quiet lately", near-zero means "never wanted", and the
+            # two look identical without this.
             "uploaded_ever": int(t.get("uploadedEver") or 0),
+            "downloaded_ever": int(t.get("downloadedEver") or 0),
             "ratio": t.get("uploadRatio"),
         })
     # Movers first; the idle tail keeps a stable alphabetical order so rows

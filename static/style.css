@@ -2508,7 +2508,8 @@ body.checking .torrent-list { padding-bottom: 96px; }
     font-family: var(--mono);
     font-size: 11px;
     color: var(--text-strong);
-    min-width: 62px;
+    /* fits "999.9 MB in 30d" so the column stays aligned down the list */
+    min-width: 108px;
     text-align: right;
 }
 

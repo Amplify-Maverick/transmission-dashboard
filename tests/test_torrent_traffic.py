@@ -286,10 +286,23 @@ class TorrentTrafficTests(unittest.TestCase):
 
     # ---- seeding list + per-row series ----
 
-    def _seeding(self, hash, name, status=6, up=0, peers=0):
+    def _seeding(self, hash, name, status=6, up=0, down=0, peers=0):
         return {"hashString": hash, "name": name, "status": status,
-                "uploadedEver": up, "downloadedEver": 0,
+                "uploadedEver": up, "downloadedEver": down,
                 "peersConnected": peers, "uploadRatio": 1.5, "id": 1}
+
+    def test_seeding_list_carries_lifetime_counters(self):
+        """A zero window total is ambiguous on its own — the row shows
+        lifetime beside it so "quiet lately" and "never wanted" can be told
+        apart, and each direction needs its own counter."""
+        live = [self._seeding("aa", "A", up=5_000_000, down=2_000)]
+        with patch.object(app.client, "get_stats_torrents", return_value=live):
+            data = self.client.get(
+                "/api/metrics/torrents/seeding?range=24h").get_json()
+        row = data["torrents"][0]
+        self.assertEqual(row["uploaded_ever"], 5_000_000)
+        self.assertEqual(row["downloaded_ever"], 2_000)
+        self.assertEqual(row["bytes"], 0)   # nothing recorded in the window
 
     def test_seeding_list_includes_idle_seeders(self):
         """The list is live daemon state, not traffic history — a torrent

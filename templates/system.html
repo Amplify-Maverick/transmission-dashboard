@@ -1033,6 +1033,10 @@
             const bits = [];
             if (r.peers) bits.push(`${r.peers} peer${r.peers === 1 ? '' : 's'}`);
             if (r.ratio != null && r.ratio >= 0) bits.push(`ratio ${fmtRatio(r.ratio)}`);
+            // Lifetime for whichever direction is being shown, so the two
+            // byte figures on the row are always the same measure.
+            const lifetime = ttMetric === 'up' ? r.uploaded_ever : r.downloaded_ever;
+            if (lifetime != null) bits.push(`${fmtBytes(lifetime)} lifetime`);
             return bits.join(' · ');
         }
 
@@ -1057,7 +1061,8 @@
                     `<span class="tl-caret" aria-hidden="true"></span>` +
                     `<span class="tl-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>` +
                     (meta ? `<span class="tl-meta">${escapeHtml(meta)}</span>` : '') +
-                    `<span class="tl-bytes${r.bytes ? '' : ' tl-zero'}">${escapeHtml(fmtBytes(r.bytes))}</span>` +
+                    `<span class="tl-bytes${r.bytes ? '' : ' tl-zero'}">` +
+                    `${escapeHtml(fmtBytes(r.bytes))} in ${escapeHtml(ttRange)}</span>` +
                     `</button>` +
                     `<div class="tl-panel" id="tl-panel-${i}"${open ? '' : ' hidden'}></div>` +
                     `</div>`;
