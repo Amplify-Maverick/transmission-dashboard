@@ -284,11 +284,79 @@ class TorrentTrafficTests(unittest.TestCase):
         self.assertEqual(len(data["totals"]), 9)
         self.assertEqual(len(data["series"]), app._TORRENT_SERIES_MAX)
 
+    # ---- per-torrent panels (series=all) ----
+
+    def test_series_all_returns_a_panel_for_every_torrent(self):
+        """The combined chart caps at 5 for colour reasons; the panel grid
+        must not — the whole point is seeing every torrent."""
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [
+            (f"h{i}", f"T{i}", 1000 - i, 0) for i in range(12)])
+        data = self.client.get(
+            "/api/metrics/torrents?range=24h&series=all").get_json()
+        self.assertEqual(data["series_mode"], "all")
+        self.assertEqual(len(data["series"]), 12)
+        self.assertEqual(len(data["totals"]), 12)
+        self.assertTrue(all(s["points"] for s in data["series"]))
+
+    def test_series_top_still_caps_at_five(self):
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [
+            (f"h{i}", f"T{i}", 1000 - i, 0) for i in range(12)])
+        data = self.client.get("/api/metrics/torrents?range=24h").get_json()
+        self.assertEqual(data["series_mode"], "top")
+        self.assertEqual(len(data["series"]), app._TORRENT_SERIES_MAX)
+
+    def test_panel_grid_is_capped_and_says_so(self):
+        """A client with hundreds of torrents must not be sent every one."""
+        now = int(__import__("time").time())
+        n = app._TORRENT_PANEL_MAX + 10
+        db.add_torrent_traffic(now - 60, [
+            (f"h{i:04}", f"T{i}", n - i, 0) for i in range(n)])
+        data = self.client.get(
+            "/api/metrics/torrents?range=24h&series=all").get_json()
+        self.assertEqual(len(data["series"]), app._TORRENT_PANEL_MAX)
+        self.assertTrue(data["truncated"])
+
+    def test_not_truncated_when_everything_fits(self):
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [("aa", "A", 100, 0)])
+        data = self.client.get(
+            "/api/metrics/torrents?range=24h&series=all").get_json()
+        self.assertFalse(data["truncated"])
+
+    def test_panels_align_with_their_totals(self):
+        """The grid labels each panel with its total, looked up by hash —
+        so the ordering the server sends has to be self-consistent."""
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [
+            ("aa", "A", 900, 0), ("bb", "B", 300, 0), ("cc", "C", 100, 0)])
+        data = self.client.get(
+            "/api/metrics/torrents?range=24h&series=all").get_json()
+        totals = {r["hash"]: r["up_bytes"] for r in data["totals"]}
+        for s in data["series"]:
+            self.assertIn(s["hash"], totals)
+            self.assertEqual(sum(p["v"] for p in s["points"]), totals[s["hash"]])
+
+    def test_series_all_uses_fewer_points_per_panel(self):
+        """Panels are ~200px wide; sending 120 points each would bloat the
+        payload for no visible gain."""
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [("aa", "A", 100, 0)])
+        top = self.client.get("/api/metrics/torrents?range=30d").get_json()
+        grid = self.client.get(
+            "/api/metrics/torrents?range=30d&series=all").get_json()
+        self.assertLess(len(grid["series"][0]["points"]),
+                        len(top["series"][0]["points"]))
+        self.assertGreater(grid["step_secs"], top["step_secs"])
+
     def test_endpoint_rejects_bad_args(self):
         self.assertEqual(
             self.client.get("/api/metrics/torrents?range=nope").status_code, 400)
         self.assertEqual(
             self.client.get("/api/metrics/torrents?metric=sideways").status_code, 400)
+        self.assertEqual(
+            self.client.get("/api/metrics/torrents?series=some").status_code, 400)
 
     def test_endpoint_requires_login(self):
         with self.client.session_transaction() as s:

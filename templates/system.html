@@ -337,6 +337,16 @@
                     </div>
                     <div class="chart-block">
                         <h3 class="chart-title">Over time <span class="chart-sub" id="tt-series-sub"></span></h3>
+                        <div class="chart-controls" style="margin-bottom:8px">
+                            <div class="chart-range" id="tt-view" role="tablist" aria-label="Chart view">
+                                <button type="button" data-view="top" class="active">Top 5 combined</button>
+                                <button type="button" data-view="all">Every torrent</button>
+                            </div>
+                            <div class="chart-range" id="tt-scale" role="tablist" aria-label="Panel scale" hidden>
+                                <button type="button" data-scale="shared" class="active">Shared scale</button>
+                                <button type="button" data-scale="own">Own scale</button>
+                            </div>
+                        </div>
                         <div class="chart-box chart-box--tall" id="chart-tt-series"></div>
                     </div>
                 </section>
@@ -930,6 +940,8 @@
                            '--series-4', '--series-5'];
         let ttRange = '24h';
         let ttMetric = 'up';
+        let ttView = 'top';      // 'top' = combined lines, 'all' = one panel each
+        let ttShared = true;     // small-multiples y-scale
         let ttData = null;
 
         // Every way this card can be empty, each with its own message —
@@ -979,14 +991,11 @@
                 ? `${fmtBytes(sum)} ${verb} · ${totals.length} torrents` : '';
 
             const series = (ttData.series || []).map((s, i) => ({
+                hash: s.hash,
                 name: s.name,
                 color: TT_COLORS[i % TT_COLORS.length],
                 points: (s.points || []).map(p => ({ t: p.t * 1000, v: p.v })),
             }));
-            Charts.areaLines(seriesEl, series, {
-                height: 200, fill: false, fmtY: fmtBytes,
-                fmtX: t => fmtAxisTime(t, ttRange), fmtTip: fmtBytes,
-            });
             // Label the step actually plotted, not the storage bucket — the
             // long ranges aggregate several buckets into one point.
             // Minutes until they'd read awkwardly — the step is a multiple of
@@ -995,21 +1004,47 @@
             const per = step >= 7200
                 ? `${(step / 3600).toFixed(step % 3600 ? 1 : 0)} h`
                 : `${Math.round(step / 60)} min`;
-            $('tt-series-sub').textContent = series.length
-                ? `top ${series.length} · per ${per}` : '';
+
+            if (ttView === 'all') {
+                // One panel per torrent. Colored by rank for the first five so
+                // the grid ties back to the bars above; the rest share slot 1.
+                const totalFor = {};
+                totals.forEach(r => { totalFor[r.hash] = r[key] || 0; });
+                // Tail panels go grey, matching the bars above — past rank 5
+                // the colour carries no identity, and reusing series-1 would
+                // make blue mean both "rank 1" and "everything else".
+                Charts.smallMultiples(seriesEl, series.map((s, i) => ({
+                    label: s.name,
+                    value: totalFor[s.hash] || 0,
+                    color: i < TT_COLORS.length ? TT_COLORS[i] : '--grey',
+                    points: s.points,
+                })), { fmtValue: fmtBytes, shared: ttShared, height: 38 });
+                const capped = ttData.truncated ? ' · capped' : '';
+                $('tt-series-sub').textContent =
+                    `${series.length} torrents · per ${per}${capped}`;
+            } else {
+                Charts.areaLines(seriesEl, series, {
+                    height: 200, fill: false, fmtY: fmtBytes,
+                    fmtX: t => fmtAxisTime(t, ttRange), fmtTip: fmtBytes,
+                });
+                $('tt-series-sub').textContent = series.length
+                    ? `top ${series.length} · per ${per}` : '';
+            }
         }
 
         async function fetchPerTorrent() {
             try {
                 const res = await fetch('/api/metrics/torrents?range='
                     + encodeURIComponent(ttRange) + '&metric='
-                    + encodeURIComponent(ttMetric), { cache: 'no-store' });
+                    + encodeURIComponent(ttMetric) + '&series='
+                    + encodeURIComponent(ttView), { cache: 'no-store' });
                 if (res.status === 401) { unauthorizedRedirect(); return; }
                 if (!res.ok) return;
                 const data = await res.json();
                 if (data.ok === false) return;
                 // Ignore a response the user has already navigated away from.
-                if (data.range !== ttRange || data.metric !== ttMetric) return;
+                if (data.range !== ttRange || data.metric !== ttMetric
+                    || data.series_mode !== ttView) return;
                 ttData = data;
                 renderPerTorrent();
             } catch (_) {}
@@ -1033,6 +1068,34 @@
                 b.classList.toggle('active', b.dataset.metric === ttMetric);
             });
             fetchPerTorrent();
+        });
+
+        document.getElementById('tt-view').addEventListener('click', ev => {
+            const btn = ev.target.closest('button[data-view]');
+            if (!btn || btn.dataset.view === ttView) return;
+            ttView = btn.dataset.view;
+            document.querySelectorAll('#tt-view button').forEach(b => {
+                b.classList.toggle('active', b.dataset.view === ttView);
+            });
+            // The scale toggle only means anything for the panel grid.
+            $('tt-scale').hidden = ttView !== 'all';
+            // The two views ask the server for different series, so the
+            // cached payload can't be reused — clear it or the grid would
+            // render the top 5 for a moment.
+            ttData = null;
+            renderPerTorrent();
+            fetchPerTorrent();
+        });
+
+        document.getElementById('tt-scale').addEventListener('click', ev => {
+            const btn = ev.target.closest('button[data-scale]');
+            if (!btn) return;
+            ttShared = btn.dataset.scale === 'shared';
+            document.querySelectorAll('#tt-scale button').forEach(b => {
+                b.classList.toggle('active',
+                    (b.dataset.scale === 'shared') === ttShared);
+            });
+            renderPerTorrent();   // purely a display change, no refetch
         });
 
         async function fetchHistory(range) {

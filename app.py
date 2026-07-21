@@ -2542,9 +2542,13 @@ def api_metrics_history():
     })
 
 
-# Colors are assigned per rank on the client, so cap the series count at the
-# number of validated categorical slots the stylesheet defines.
+# Colors are assigned per rank on the client, so cap the combined chart at
+# the number of validated categorical slots the stylesheet defines.
 _TORRENT_SERIES_MAX = 5
+# Cap on small-multiple panels. Each is one row plus its points, so this
+# bounds both the JSON payload and the number of SVGs the Pi's browser has
+# to lay out at once.
+_TORRENT_PANEL_MAX = 60
 
 
 @app.route("/api/metrics/torrents")
@@ -2560,20 +2564,29 @@ def api_metrics_torrents():
     if metric not in ("up", "down"):
         return jsonify({"ok": False, "error": "invalid metric"}), 400
     field = "up_bytes" if metric == "up" else "down_bytes"
+    # "top" plots the leaders on one shared axis; "all" gives every torrent
+    # with traffic its own small-multiple panel. The panels are ~200px wide,
+    # so they get fewer points than the full-width combined chart.
+    mode = request.args.get("series", "top")
+    if mode not in ("top", "all"):
+        return jsonify({"ok": False, "error": "invalid series"}), 400
+    default_limit = _TORRENT_PANEL_MAX if mode == "all" else 8
     try:
-        limit = min(20, max(1, int(request.args.get("limit", 8))))
+        limit = min(_TORRENT_PANEL_MAX,
+                    max(1, int(request.args.get("limit", default_limit))))
     except (TypeError, ValueError):
-        limit = 8
+        limit = default_limit
+    buckets = 60 if mode == "all" else 120
 
     since = int(time.time()) - span
     try:
         totals = db.get_torrent_traffic_totals(since, limit=limit, field=field)
-        top = totals[:_TORRENT_SERIES_MAX]
+        plotted = totals if mode == "all" else totals[:_TORRENT_SERIES_MAX]
         series_map = db.get_torrent_traffic_series(
-            since, [r["hash"] for r in top], buckets=120, field=field)
+            since, [r["hash"] for r in plotted], buckets=buckets, field=field)
         # The plotted step is wider than one storage bucket on long ranges;
         # the chart labels itself with this, so report what's actually drawn.
-        _, step_secs = db.traffic_series_grid(since, 120)
+        _, step_secs = db.traffic_series_grid(since, buckets)
         # Lets the empty state say which kind of empty this is.
         has_history = bool(totals) or db.has_torrent_traffic()
     except Exception as e:
@@ -2592,6 +2605,10 @@ def api_metrics_torrents():
         "step_secs": step_secs,
         "has_history": has_history,
         "sampler_enabled": config.METRICS_SAMPLE_INTERVAL > 0,
+        "series_mode": mode,
+        # True when torrents were dropped by the cap, so the UI can say so
+        # rather than quietly showing a partial picture.
+        "truncated": len(totals) >= limit,
         "totals": totals,
         "series": [
             {
@@ -2599,7 +2616,7 @@ def api_metrics_torrents():
                 "name": r["display_name"],
                 "points": series_map.get(r["hash"], []),
             }
-            for r in top
+            for r in plotted
         ],
     })
 

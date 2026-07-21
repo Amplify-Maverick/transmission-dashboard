@@ -2441,6 +2441,52 @@ body.checking .torrent-list { padding-bottom: 96px; }
     background: rgba(88, 166, 255, 0.12);
 }
 
+/* small multiples: one mini chart per torrent. auto-fill keeps panels at a
+   readable width and reflows to a single column on a phone. */
+.sm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 10px 14px;
+}
+
+.sm-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 9px 3px;
+    background: rgba(255, 255, 255, 0.015);
+    min-width: 0;   /* let the label ellipsis instead of stretching the grid */
+}
+
+.sm-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+
+.sm-label {
+    font-size: 11px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sm-value {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    flex: none;
+}
+
+.sm-scale {
+    margin-top: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+}
+
 /* Two control groups in one card header (direction + range). Wraps to
    stacked rows on narrow screens rather than squeezing the title. */
 .chart-controls {

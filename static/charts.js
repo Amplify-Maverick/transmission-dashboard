@@ -12,6 +12,7 @@
  *   Charts.barsH(el, items, opts)        horizontal ranked bars
  *   Charts.bars(el, items, opts)         vertical bars (histograms / daily)
  *   Charts.donut(el, segments, opts)     ring for categorical mix
+ *   Charts.smallMultiples(el, panels, opts)  grid of mini charts, one per entity
  *
  * `points` is an array of {t, v} (t = epoch ms or any monotonic x, v = value).
  * Colors are passed as CSS custom-property names ('--blue') and resolved once.
@@ -66,7 +67,9 @@
     const xs = pts.map(p => p.t);
     const vs = pts.map(p => p.v);
     const xMin = Math.min(...xs), xMax = Math.max(...xs);
-    const vMax = Math.max(niceMax(Math.max(...vs)), 1);
+    // opts.vMax lets a set of sparklines share one scale, so panels in a
+    // small-multiples grid stay comparable to each other.
+    const vMax = Math.max(opts.vMax || niceMax(Math.max(...vs)), 1);
     const sx = t => xMax === xMin ? VBW - pad
       : pad + (t - xMin) / (xMax - xMin) * (VBW - 2 * pad);
     const sy = v => H - pad - (v / vMax) * (H - 2 * pad);
@@ -270,6 +273,52 @@
     }).join('') + `</div>`;
   }
 
+  // ---- smallMultiples: one mini chart per entity, in a grid ----
+  // panels: [{ label, value, points:[{t,v}] }]
+  // Past a handful of series a shared-axis line chart becomes unreadable;
+  // faceting keeps every entity legible. opts.shared (default true) puts all
+  // panels on one y-scale so their heights are comparable — the honest
+  // default. Own-scale shows each panel's own shape, which is what you want
+  // when the totals differ by orders of magnitude, and is labelled as such
+  // so nobody reads the two modes the same way.
+  function smallMultiples(el, panels, opts) {
+    opts = opts || {};
+    const fmtV = opts.fmtValue || (v => String(v));
+    const color = opts.color || '--series-1';
+    const shared = opts.shared !== false;
+    clearEl(el);
+    const rows = (panels || []).filter(p => p && (p.points || []).length);
+    if (!rows.length) {
+      el.innerHTML = `<div class="chart-empty">${esc(opts.emptyText || 'No data')}</div>`;
+      return;
+    }
+    let vMax = 0;
+    if (shared) {
+      rows.forEach(p => p.points.forEach(q => {
+        if (q && isFinite(q.v) && q.v > vMax) vMax = q.v;
+      }));
+      vMax = niceMax(vMax);
+    }
+    el.innerHTML = `<div class="sm-grid">` + rows.map((p, i) =>
+      `<div class="sm-panel" data-i="${i}">` +
+      `<div class="sm-head"><span class="sm-label" title="${esc(p.label)}">${esc(p.label)}</span>` +
+      `<span class="sm-value">${esc(fmtV(p.value))}</span></div>` +
+      `<div class="sm-spark"></div></div>`
+    ).join('') + `</div>` +
+      `<div class="sm-scale">${shared
+        ? `shared scale · peak ${esc(fmtV(vMax))}`
+        : 'independent scale per torrent'}</div>`;
+    // Render each sparkline into its slot after the grid is in the DOM, so
+    // the SVGs pick up the panel's real laid-out width.
+    el.querySelectorAll('.sm-panel').forEach(panel => {
+      const p = rows[+panel.dataset.i];
+      sparkline(panel.querySelector('.sm-spark'), p.points, {
+        color: p.color || color, height: opts.height || 38,
+        vMax: shared ? vMax : 0,
+      });
+    });
+  }
+
   // ---- donut: categorical mix ----
   // segments: [{ label, value, color:'--green' }]
   function donut(el, segments, opts) {
@@ -306,5 +355,5 @@
       `aria-label="${esc(segs.map(s => s.label + ' ' + fmtV(s.value)).join(', '))}">${arcs}${center}</svg>${legend}</div>`;
   }
 
-  window.Charts = { sparkline, areaLines, barsH, bars, donut };
+  window.Charts = { sparkline, areaLines, barsH, bars, donut, smallMultiples };
 })();
