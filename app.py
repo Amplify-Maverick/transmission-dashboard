@@ -2210,6 +2210,65 @@ def api_system():
 
 # ---------- aggregate stats ----------
 
+# Fixed bucket edges for the System page distribution charts. Ratio bands are
+# the ones seeders actually care about (below 1.0 = still owing); size bands
+# are roughly log-scaled across the range of a typical library.
+_RATIO_BUCKETS = (
+    ("< 0.5", 0.0, 0.5), ("0.5–1", 0.5, 1.0), ("1–2", 1.0, 2.0),
+    ("2–5", 2.0, 5.0), ("5+", 5.0, float("inf")),
+)
+_GB = 1024 ** 3
+_MB = 1024 ** 2
+_SIZE_BUCKETS = (
+    ("< 100 MB", 0, 100 * _MB), ("100 MB–1 GB", 100 * _MB, _GB),
+    ("1–5 GB", _GB, 5 * _GB), ("5–20 GB", 5 * _GB, 20 * _GB),
+    ("20 GB+", 20 * _GB, float("inf")),
+)
+
+
+def _torrent_distribution(torrents):
+    """Snapshot distributions of the current torrent set for the System page
+    charts: ratio histogram, size histogram, and library bytes by label."""
+    ratio_counts = [0] * len(_RATIO_BUCKETS)
+    size_counts = [0] * len(_SIZE_BUCKETS)
+    by_label = {}
+    for t in torrents:
+        size = int(t.get("totalSize") or 0)
+        for i, (_, lo, hi) in enumerate(_SIZE_BUCKETS):
+            if lo <= size < hi:
+                size_counts[i] += 1
+                break
+        r = t.get("uploadRatio")
+        if r is not None and r >= 0 and (t.get("uploadedEver") or 0) > 0:
+            for i, (_, lo, hi) in enumerate(_RATIO_BUCKETS):
+                if lo <= r < hi:
+                    ratio_counts[i] += 1
+                    break
+        labels = t.get("labels") or []
+        if not labels:
+            labels = ["Unlabeled"]
+        for lb in labels:
+            agg = by_label.setdefault(lb, {"bytes": 0, "count": 0})
+            agg["bytes"] += size
+            agg["count"] += 1
+    label_list = sorted(
+        ({"label": k, "bytes": v["bytes"], "count": v["count"]}
+         for k, v in by_label.items()),
+        key=lambda d: d["bytes"], reverse=True,
+    )[:8]
+    return {
+        "ratio_buckets": [
+            {"label": _RATIO_BUCKETS[i][0], "count": n}
+            for i, n in enumerate(ratio_counts)
+        ],
+        "size_buckets": [
+            {"label": _SIZE_BUCKETS[i][0], "count": n}
+            for i, n in enumerate(size_counts)
+        ],
+        "by_label": label_list,
+    }
+
+
 @app.route("/api/stats")
 @login_required
 def api_stats():
@@ -2288,13 +2347,20 @@ def api_stats():
         if oldest is None or added < oldest["value"]:
             oldest = {"id": t.get("id"), "name": t.get("name"), "value": added}
 
+    distribution = _torrent_distribution(torrents)
+
     try:
         lifetime = db.get_lifetime_stats()
     except Exception:
         lifetime = {}
+    try:
+        lifetime["copies_daily"] = db.get_copy_history_daily(30)
+    except Exception:
+        lifetime["copies_daily"] = []
 
     return jsonify({
         "ok": True,
+        "distribution": distribution,
         "torrents": {
             "count": int(sess.get("torrentCount") or len(torrents)),
             "active": int(sess.get("activeTorrentCount") or 0),
@@ -2328,6 +2394,37 @@ def api_stats():
             "oldest": oldest,
         },
         "history": lifetime,
+    })
+
+
+# Named ranges the System page graphs offer, in seconds.
+_METRICS_RANGES = {
+    "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600,
+    "7d": 7 * 86400, "30d": 30 * 86400,
+}
+
+
+@app.route("/api/metrics/history")
+@login_required
+def api_metrics_history():
+    rng = request.args.get("range", "1h")
+    span = _METRICS_RANGES.get(rng)
+    if span is None:
+        return jsonify({"ok": False, "error": "invalid range"}), 400
+    try:
+        buckets = min(500, max(20, int(request.args.get("buckets", 240))))
+    except (TypeError, ValueError):
+        buckets = 240
+    try:
+        since = int(time.time()) - span
+        series = db.get_metrics_range(since, buckets=buckets)
+    except Exception as e:
+        return _err(e)
+    return jsonify({
+        "ok": True,
+        "range": rng,
+        "sample_interval": config.METRICS_SAMPLE_INTERVAL,
+        "series": series,
     })
 
 
@@ -2833,6 +2930,85 @@ def _tunnel_recovery_worker():
 
 if config.TUNNEL_IFACE and config.TUNNEL_RECOVERY_CMD:
     threading.Thread(target=_tunnel_recovery_worker, daemon=True).start()
+
+
+# ---------- metrics sampler ----------
+#
+# Snapshots torrent + system stats into SQLite on a fixed interval so the
+# System page can chart trends over time. Runs in one background daemon (the
+# production deploy is a single gunicorn worker); the metrics_samples primary
+# key is the second-granularity timestamp, so even an accidental double-start
+# (e.g. the Werkzeug reloader) can't create duplicate rows.
+
+_metrics_sampler_started = False
+# Own net-counter baseline so rate deltas don't contend with the /api/system
+# request path, which keeps its own baseline in _net_rates().
+_sampler_prev_net = None
+_sampler_prev_ts = None
+
+
+def _sampler_net_rates():
+    global _sampler_prev_net, _sampler_prev_ts
+    now = time.monotonic()
+    cur = psutil.net_io_counters()
+    if _sampler_prev_net is None or _sampler_prev_ts is None:
+        _sampler_prev_net, _sampler_prev_ts = cur, now
+        return 0, 0
+    dt = now - _sampler_prev_ts
+    if dt <= 0:
+        return 0, 0
+    rx = max(0, cur.bytes_recv - _sampler_prev_net.bytes_recv) / dt
+    tx = max(0, cur.bytes_sent - _sampler_prev_net.bytes_sent) / dt
+    _sampler_prev_net, _sampler_prev_ts = cur, now
+    return int(rx), int(tx)
+
+
+def _collect_metric_sample():
+    """Build one metrics_samples row from live Transmission + psutil state."""
+    sess = client.get_session_stats() or {}
+    torrents = client.get_stats_torrents() or []
+    cumulative = sess.get("cumulative-stats") or {}
+    up = int(cumulative.get("uploadedBytes") or 0)
+    down = int(cumulative.get("downloadedBytes") or 0)
+    rx_rate, tx_rate = _sampler_net_rates()
+    try:
+        disk_pct = psutil.disk_usage(_disk_target()).percent
+    except Exception:
+        disk_pct = None
+    return {
+        "download_speed": int(sess.get("downloadSpeed") or 0),
+        "upload_speed": int(sess.get("uploadSpeed") or 0),
+        "uploaded_bytes": up,
+        "downloaded_bytes": down,
+        "ratio": (up / down) if down > 0 else None,
+        "active_count": int(sess.get("activeTorrentCount") or 0),
+        "torrent_count": int(sess.get("torrentCount") or len(torrents)),
+        "swarm_peers": sum(int(t.get("peersConnected") or 0) for t in torrents),
+        "cpu_percent": psutil.cpu_percent(interval=None),
+        "mem_percent": psutil.virtual_memory().percent,
+        "disk_percent": disk_pct,
+        "net_rx_rate": rx_rate,
+        "net_tx_rate": tx_rate,
+    }
+
+
+def _metrics_sampler_worker():
+    interval = max(5.0, config.METRICS_SAMPLE_INTERVAL)
+    # Prime the net-rate baseline so the first stored sample isn't a zero.
+    _sampler_net_rates()
+    while True:
+        time.sleep(interval)
+        try:
+            db.insert_metric_sample(int(time.time()), **_collect_metric_sample())
+            db._maybe_prune_metrics()
+        except Exception:
+            # Never let the sampler die; the next tick retries from scratch.
+            pass
+
+
+if config.METRICS_SAMPLE_INTERVAL > 0 and not _metrics_sampler_started:
+    _metrics_sampler_started = True
+    threading.Thread(target=_metrics_sampler_worker, daemon=True).start()
 
 
 # ---------- update-available indicator ----------

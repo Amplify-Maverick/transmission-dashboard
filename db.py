@@ -76,11 +76,40 @@ CREATE TABLE IF NOT EXISTS unloaded_torrents (
     unloaded_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS metrics_samples (
+    ts_epoch INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    download_speed INTEGER DEFAULT 0,
+    upload_speed INTEGER DEFAULT 0,
+    uploaded_bytes INTEGER DEFAULT 0,
+    downloaded_bytes INTEGER DEFAULT 0,
+    ratio REAL,
+    active_count INTEGER DEFAULT 0,
+    torrent_count INTEGER DEFAULT 0,
+    swarm_peers INTEGER DEFAULT 0,
+    cpu_percent REAL,
+    mem_percent REAL,
+    disk_percent REAL,
+    net_rx_rate INTEGER DEFAULT 0,
+    net_tx_rate INTEGER DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_copy_history_finished ON copy_history(finished_at DESC);
 CREATE INDEX IF NOT EXISTS idx_unloaded_torrents_at ON unloaded_torrents(unloaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_removed_torrents_removed ON removed_torrents(removed_at DESC);
 """
+
+# Numeric columns on metrics_samples, in the order the sampler supplies them
+# and the order the downsampling query aggregates them. Counters (cumulative
+# up/down bytes) take MAX per bucket because they only climb; everything else
+# is an average of the samples in the bucket.
+_METRIC_COLS = (
+    "download_speed", "upload_speed", "uploaded_bytes", "downloaded_bytes",
+    "ratio", "active_count", "torrent_count", "swarm_peers",
+    "cpu_percent", "mem_percent", "disk_percent", "net_rx_rate", "net_tx_rate",
+)
+_METRIC_COUNTER_COLS = frozenset({"uploaded_bytes", "downloaded_bytes"})
 
 
 def _now_iso():
@@ -142,6 +171,8 @@ def init():
     # Drop events past retention on every boot; day-to-day pruning happens
     # opportunistically from log_event.
     _maybe_prune_events()
+    # Same for metric samples — the sampler also prunes hourly while running.
+    _maybe_prune_metrics()
 
 
 def record_copy(torrent_id, torrent_name, **fields):
@@ -431,6 +462,102 @@ def get_lifetime_stats():
         "copies_done": copy["done"],
         "copy_bytes": copy["bytes"],
     }
+
+
+def get_copy_history_daily(days=30):
+    """Bytes copied to the media server per calendar day (UTC), oldest first.
+    finished_at is ISO8601 UTC, so its first 10 chars are the YYYY-MM-DD date
+    and lexicographic comparison against the cutoff is chronological."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    c = _conn()
+    rows = c.execute(
+        """SELECT substr(finished_at, 1, 10) AS day,
+                  COUNT(*) AS copies,
+                  COALESCE(SUM(bytes_transferred), 0) AS bytes
+           FROM copy_history
+           WHERE status = 'done' AND finished_at >= ?
+           GROUP BY day
+           ORDER BY day ASC""",
+        (cutoff,),
+    ).fetchall()
+    return [
+        {"day": r["day"], "copies": r["copies"], "bytes": r["bytes"]}
+        for r in rows
+    ]
+
+
+# ---------- metrics time-series ----------
+#
+# The sampler daemon (see app.py) writes one row per interval. Rows are pruned
+# past retention; reads are downsampled server-side into a bounded number of
+# buckets so a 30-day range never ships tens of thousands of points.
+
+METRICS_RETENTION_DAYS = int(os.getenv("METRICS_RETENTION_DAYS", "30"))
+_METRICS_PRUNE_INTERVAL = 3600.0
+_metrics_prune_lock = threading.Lock()
+_metrics_last_prune = 0.0
+
+
+def insert_metric_sample(ts_epoch, **cols):
+    names = ["ts_epoch", "ts"]
+    values = [int(ts_epoch), datetime.fromtimestamp(
+        int(ts_epoch), tz=timezone.utc).isoformat()]
+    for name in _METRIC_COLS:
+        names.append(name)
+        values.append(cols.get(name))
+    placeholders = ", ".join("?" for _ in names)
+    with _tx() as c:
+        # Ignore a duplicate second-granularity timestamp rather than error.
+        c.execute(
+            f"INSERT OR IGNORE INTO metrics_samples ({', '.join(names)}) "
+            f"VALUES ({placeholders})",
+            values,
+        )
+
+
+def prune_metrics(days=None):
+    days = METRICS_RETENTION_DAYS if days is None else days
+    cutoff = int(time.time()) - int(days) * 86400
+    with _tx() as c:
+        c.execute("DELETE FROM metrics_samples WHERE ts_epoch < ?", (cutoff,))
+
+
+def _maybe_prune_metrics():
+    global _metrics_last_prune
+    now = time.monotonic()
+    with _metrics_prune_lock:
+        if _metrics_last_prune and now - _metrics_last_prune < _METRICS_PRUNE_INTERVAL:
+            return
+        _metrics_last_prune = now
+    try:
+        prune_metrics()
+    except sqlite3.Error:
+        # Housekeeping — never let it break the sampler.
+        pass
+
+
+def get_metrics_range(since_epoch, buckets=240):
+    """Averaged (counters: max) metric series since `since_epoch`, downsampled
+    to at most `buckets` points. Returns oldest-first list of dicts with `t`
+    (epoch seconds, bucket start) plus one key per metric column."""
+    since_epoch = int(since_epoch)
+    buckets = max(1, int(buckets))
+    span = max(1, int(time.time()) - since_epoch)
+    bucket_secs = max(1, span // buckets)
+    aggs = []
+    for name in _METRIC_COLS:
+        fn = "MAX" if name in _METRIC_COUNTER_COLS else "AVG"
+        aggs.append(f"{fn}({name}) AS {name}")
+    c = _conn()
+    rows = c.execute(
+        f"""SELECT MIN(ts_epoch) AS t, {', '.join(aggs)}
+            FROM metrics_samples
+            WHERE ts_epoch >= ?
+            GROUP BY ts_epoch / ?
+            ORDER BY t ASC""",
+        (since_epoch, bucket_secs),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def list_events(limit=200, since=None):

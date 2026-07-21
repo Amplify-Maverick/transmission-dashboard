@@ -18,6 +18,14 @@ TR_SETTINGS_FILE = os.getenv(
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/var/lib/transmission-daemon/downloads")
 USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
 
+# Metrics sampler. A background thread snapshots torrent + system stats into
+# SQLite on this interval so the System page can chart trends over time.
+# METRICS_SAMPLE_INTERVAL is seconds between samples (0 disables the sampler
+# entirely); METRICS_RETENTION_DAYS (read in db.py) bounds how far back rows
+# are kept. 30s keeps ~2,880 rows/day — trivial for SQLite — while still
+# resolving short upload/download bursts.
+METRICS_SAMPLE_INTERVAL = float(os.getenv("METRICS_SAMPLE_INTERVAL", "30"))
+
 # WireGuard interface that Transmission outbound traffic should be bound to.
 # Surfaced in the UI as a tunnel status indicator so a dropped tunnel is
 # visible before traffic leaks out the bare ISP link. TUNNEL_IFACE is the

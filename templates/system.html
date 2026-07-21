@@ -101,6 +101,32 @@
                     </div>
                 </section>
 
+                <section class="system-card system-card-wide" id="card-trends">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Transfer &amp; trends</h2>
+                        <div class="chart-range" id="trend-range" role="tablist" aria-label="Time range">
+                            <button type="button" data-range="live" class="active">Live</button>
+                            <button type="button" data-range="1h">1h</button>
+                            <button type="button" data-range="6h">6h</button>
+                            <button type="button" data-range="24h">24h</button>
+                            <button type="button" data-range="7d">7d</button>
+                            <button type="button" data-range="30d">30d</button>
+                        </div>
+                    </header>
+                    <div class="chart-block">
+                        <h3 class="chart-title">Transfer speed <span class="chart-sub" id="throughput-sub"></span></h3>
+                        <div class="chart-box chart-box--tall" id="chart-throughput"></div>
+                    </div>
+                    <div class="chart-block">
+                        <h3 class="chart-title">Swarm &amp; activity</h3>
+                        <div class="chart-box" id="chart-swarm"></div>
+                    </div>
+                    <div class="chart-block">
+                        <h3 class="chart-title">System load</h3>
+                        <div class="chart-box" id="chart-load"></div>
+                    </div>
+                </section>
+
                 <section class="system-card" id="card-cpu">
                     <header class="system-card-header">
                         <h2 class="system-card-title">CPU</h2>
@@ -113,6 +139,7 @@
                     <div class="meter">
                         <div class="meter-fill" id="cpu-bar" style="width: 0%"></div>
                     </div>
+                    <div class="card-spark" id="cpu-spark" aria-hidden="true"></div>
                     <div class="metric-row" id="cpu-temp-row" hidden>
                         <span class="metric-label">Temperature</span>
                         <span class="metric-value" id="cpu-temp">—</span>
@@ -155,6 +182,7 @@
                     <div class="meter">
                         <div class="meter-fill" id="swap-bar" style="width: 0%"></div>
                     </div>
+                    <div class="card-spark" id="mem-spark" aria-hidden="true"></div>
                     <p class="metric-hint" id="swap-sub">—</p>
                 </section>
 
@@ -199,6 +227,14 @@
                             <span class="metric-cell-label">Total sent</span>
                             <span class="metric-cell-value" id="net-tx-total">—</span>
                         </div>
+                    </div>
+                    <div class="card-spark card-spark--labelled">
+                        <span class="card-spark-tag">↓</span>
+                        <div class="card-spark-line" id="net-rx-spark"></div>
+                    </div>
+                    <div class="card-spark card-spark--labelled">
+                        <span class="card-spark-tag">↑</span>
+                        <div class="card-spark-line" id="net-tx-spark"></div>
                     </div>
                 </section>
 
@@ -248,6 +284,43 @@
                         </div>
                     </div>
                 </section>
+
+                <section class="system-card system-card-wide" id="card-distribution">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Library &amp; swarm</h2>
+                        <span class="system-card-sub">Snapshot of current torrents</span>
+                    </header>
+                    <div class="dist-grid">
+                        <div class="chart-block">
+                            <h3 class="chart-title">Status mix</h3>
+                            <div class="chart-box" id="chart-status"></div>
+                        </div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">Top seeded</h3>
+                            <div class="chart-box" id="chart-top-seeded"></div>
+                        </div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">Library by label</h3>
+                            <div class="chart-box" id="chart-by-label"></div>
+                        </div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">Ratio distribution</h3>
+                            <div class="chart-box chart-box--short" id="chart-ratio-hist"></div>
+                        </div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">Size distribution</h3>
+                            <div class="chart-box chart-box--short" id="chart-size-hist"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="system-card system-card-wide" id="card-media-transfers">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Media transfers</h2>
+                        <span class="system-card-sub">Copied to media server · last 30 days</span>
+                    </header>
+                    <div class="chart-box" id="chart-copies-daily"></div>
+                </section>
             </div>
         </div>
     </main>
@@ -272,6 +345,7 @@
 
     <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
     <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script src="{{ url_for('static', filename='charts.js') }}"></script>
     <script>
         // 5s, not 2s: each /api/system hit runs five psutil probes
         // (including a full /proc scan for the process count) on the Pi,
@@ -289,6 +363,26 @@
         let pollBusy = false;
         let tunnelBusy = false;
         let statsBusy = false;
+
+        // ---- rolling in-memory buffers for live charts ----
+        // Capped arrays appended on each poll; they build a live window while
+        // the page is open and reset on reload. Persisted ranges are fetched
+        // separately from /api/metrics/history.
+        const SYS_BUF_MAX = 360;   // ~30 min at 5s
+        const STATS_BUF_MAX = 240; // ~60 min at 15s
+        const sysBuf = [];         // {t, cpu, mem, disk, rx, tx}
+        const statsBuf = [];       // {t, down, up, active, peers, ratio}
+        function pushCapped(arr, item, max) {
+            arr.push(item);
+            if (arr.length > max) arr.shift();
+        }
+
+        // Time range for the trend charts: 'live' uses the buffers above;
+        // named ranges fetch downsampled history from the server.
+        let trendRange = 'live';
+        let metricsTimer = null;
+        let historySeries = null; // last fetched /api/metrics/history rows
+        let lastStatsData = null; // last /api/stats payload (for distribution)
 
         const errorEl = document.getElementById('system-error');
 
@@ -619,6 +713,19 @@
                 if (!res.ok) return;
                 const data = await res.json();
                 renderStats(data);
+                lastStatsData = data;
+                const t = data.torrents || {};
+                pushCapped(statsBuf, {
+                    t: Date.now(),
+                    down: t.download_speed,
+                    up: t.upload_speed,
+                    active: t.active,
+                    peers: t.swarm_peers,
+                    ratio: (data.lifetime || {}).ratio,
+                }, STATS_BUF_MAX);
+                renderDistribution(data);
+                renderCopiesDaily(data);
+                if (trendRange === 'live') { renderThroughputChart(); renderSwarmChart(); }
             } catch (_) {} finally {
                 statsBusy = false;
             }
@@ -656,6 +763,16 @@
                 // separate pollDisk used to re-fetch the same endpoint on
                 // its own timer just to paint the disk card.
                 renderDisk(data);
+                pushCapped(sysBuf, {
+                    t: Date.now(),
+                    cpu: (data.cpu || {}).percent,
+                    mem: (data.memory || {}).percent,
+                    disk: (data.disk || {}).percent,
+                    rx: (data.network || {}).rx_rate,
+                    tx: (data.network || {}).tx_rate,
+                }, SYS_BUF_MAX);
+                renderSparks();
+                if (trendRange === 'live') renderLoadChart();
                 setLive(true);
                 clearError();
             } catch (err) {
@@ -665,6 +782,151 @@
                 pollBusy = false;
             }
         }
+
+        // ---- chart rendering ----
+        const $ = id => document.getElementById(id);
+
+        function fmtAxisTime(t, range) {
+            const d = new Date(t);
+            if (isNaN(d.getTime())) return '';
+            if (range === '7d' || range === '30d') {
+                return `${d.getMonth() + 1}/${d.getDate()}`;
+            }
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        const axisFmt = () => (t => fmtAxisTime(t, trendRange));
+
+        // Build {t,v} point arrays from either the live buffer or fetched
+        // history. Live buffers store t in ms; history stores epoch seconds.
+        function livePts(buf, key) { return buf.map(r => ({ t: r.t, v: r[key] })); }
+        function histPts(key) {
+            return (historySeries || []).map(r => ({ t: r.t * 1000, v: r[key] }));
+        }
+        function usingHistory() { return trendRange !== 'live'; }
+
+        function renderSparks() {
+            if (!window.Charts) return;
+            Charts.sparkline($('cpu-spark'), livePts(sysBuf, 'cpu'), { color: '--blue' });
+            Charts.sparkline($('mem-spark'), livePts(sysBuf, 'mem'), { color: '--blue' });
+            Charts.sparkline($('net-rx-spark'), livePts(sysBuf, 'rx'), { color: '--blue', height: 30 });
+            Charts.sparkline($('net-tx-spark'), livePts(sysBuf, 'tx'), { color: '--green', height: 30 });
+        }
+
+        function renderThroughputChart() {
+            if (!window.Charts) return;
+            const down = usingHistory() ? histPts('download_speed') : livePts(statsBuf, 'down');
+            const up = usingHistory() ? histPts('upload_speed') : livePts(statsBuf, 'up');
+            Charts.areaLines($('chart-throughput'), [
+                { name: '↓ Download', color: '--blue', points: down },
+                { name: '↑ Upload', color: '--green', points: up },
+            ], { height: 200, fmtY: fmtRate, fmtX: axisFmt(), fmtTip: fmtRate });
+            const last = statsBuf[statsBuf.length - 1];
+            if (last && !usingHistory()) {
+                $('throughput-sub').textContent = `↓ ${fmtRate(last.down)} · ↑ ${fmtRate(last.up)}`;
+            } else {
+                $('throughput-sub').textContent = '';
+            }
+        }
+
+        function renderSwarmChart() {
+            if (!window.Charts) return;
+            const active = usingHistory() ? histPts('active_count') : livePts(statsBuf, 'active');
+            const peers = usingHistory() ? histPts('swarm_peers') : livePts(statsBuf, 'peers');
+            Charts.areaLines($('chart-swarm'), [
+                { name: 'Active torrents', color: '--blue', points: active },
+                { name: 'Swarm peers', color: '--yellow', points: peers },
+            ], { height: 160, fmtY: v => String(Math.round(v)), fmtX: axisFmt(),
+                 fmtTip: v => String(Math.round(v)) });
+        }
+
+        function renderLoadChart() {
+            if (!window.Charts) return;
+            const cpu = usingHistory() ? histPts('cpu_percent') : livePts(sysBuf, 'cpu');
+            const mem = usingHistory() ? histPts('mem_percent') : livePts(sysBuf, 'mem');
+            const disk = usingHistory() ? histPts('disk_percent') : livePts(sysBuf, 'disk');
+            Charts.areaLines($('chart-load'), [
+                { name: 'CPU', color: '--blue', points: cpu },
+                { name: 'Memory', color: '--green', points: mem },
+                { name: 'Disk', color: '--yellow', points: disk },
+            ], { height: 160, minYMax: 100, fmtY: v => `${Math.round(v)}%`,
+                 fmtX: axisFmt(), fmtTip: v => `${(v || 0).toFixed(1)}%` });
+        }
+
+        function renderTrendCharts() {
+            renderThroughputChart();
+            renderSwarmChart();
+            renderLoadChart();
+        }
+
+        function renderDistribution(data) {
+            if (!window.Charts || !data) return;
+            const t = data.torrents || {};
+            const mix = t.status_counts || {};
+            Charts.donut($('chart-status'), [
+                { label: 'Seeding', value: mix.seeding || 0, color: '--green' },
+                { label: 'Downloading', value: mix.downloading || 0, color: '--blue' },
+                { label: 'Paused', value: mix.paused || 0, color: '--grey' },
+                { label: 'Other', value: mix.other || 0, color: '--yellow' },
+            ], { centerLabel: fmtCount(t.count), centerSub: 'torrents',
+                 fmtValue: v => fmtCount(v) });
+
+            const sup = data.superlatives || {};
+            Charts.barsH($('chart-top-seeded'),
+                (sup.top_uploaders || []).slice(0, 8).map(u => ({ label: u.name, value: u.value })),
+                { color: '--green', fmtValue: fmtBytes });
+
+            const dist = data.distribution || {};
+            Charts.barsH($('chart-by-label'),
+                (dist.by_label || []).map(l => ({ label: l.label, value: l.bytes })),
+                { color: '--blue', fmtValue: fmtBytes });
+            Charts.bars($('chart-ratio-hist'),
+                (dist.ratio_buckets || []).map(b => ({ label: b.label, value: b.count })),
+                { color: '--green', fmtValue: fmtCount });
+            Charts.bars($('chart-size-hist'),
+                (dist.size_buckets || []).map(b => ({ label: b.label, value: b.count })),
+                { color: '--blue', fmtValue: fmtCount });
+        }
+
+        function renderCopiesDaily(data) {
+            if (!window.Charts || !data) return;
+            const daily = (data.history || {}).copies_daily || [];
+            Charts.bars($('chart-copies-daily'),
+                daily.map(d => ({ label: d.day.slice(5), value: d.bytes })),
+                { color: '--green', fmtValue: fmtBytes });
+        }
+
+        async function fetchHistory(range) {
+            try {
+                const res = await fetch('/api/metrics/history?range=' + encodeURIComponent(range),
+                    { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.ok === false) return;
+                historySeries = data.series || [];
+                if (trendRange === range) renderTrendCharts();
+            } catch (_) {}
+        }
+
+        function setTrendRange(range) {
+            trendRange = range;
+            document.querySelectorAll('#trend-range button').forEach(b => {
+                b.classList.toggle('active', b.dataset.range === range);
+            });
+            if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+            if (range === 'live') {
+                historySeries = null;
+                renderTrendCharts();
+            } else {
+                fetchHistory(range);
+                metricsTimer = setInterval(() => fetchHistory(range), 60000);
+            }
+        }
+
+        document.getElementById('trend-range').addEventListener('click', ev => {
+            const btn = ev.target.closest('button[data-range]');
+            if (btn) setTrendRange(btn.dataset.range);
+        });
 
         function start() {
             poll();
@@ -680,8 +942,11 @@
                 if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
                 if (tunnelTimer) { clearInterval(tunnelTimer); tunnelTimer = null; }
                 if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+                if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
             } else if (!pollTimer) {
                 start();
+                // Resume history polling if a persisted range was selected.
+                if (trendRange !== 'live') setTrendRange(trendRange);
             }
         });
 
