@@ -6,6 +6,7 @@ import re
 import shlex
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -97,6 +98,10 @@ def _copy_severity(status):
         return "info"
     if status == "cancelled":
         return "info"
+    if status == "interrupted":
+        # Nothing was corrupted — the worker just died mid-transfer. Retrying
+        # resumes, so this is a warning rather than a failure.
+        return "warn"
     return "error"
 
 def _atomic_write_json(path, data):
@@ -133,6 +138,33 @@ _copy_state_last_flush = 0.0
 _COPY_STATE_FLUSH_MIN_INTERVAL = 15.0
 _active_copies = {}
 _active_copies_lock = threading.Lock()
+
+# Liveness for the long-lived rsync transports. Short-lived helpers (df,
+# mkdir, verify) only need ConnectTimeout because they finish in seconds; a
+# copy can run for hours, so it also needs to notice a connection that has
+# gone away *after* it was established. Without these, a silently dead peer
+# (VPN relay reboot, NAT idle-eviction, media server sleeping a disk) leaves
+# rsync blocked in a read that never returns and no timeout ever fires.
+#
+# ServerAlive* gives up after ~3min of an unresponsive peer; rsync's own
+# --timeout is the backstop for a transport that stays up while data stops
+# flowing. It is deliberately much longer, since rsync can legitimately go
+# quiet while checksumming a large file.
+_COPY_SSH_CONNECT_TIMEOUT = 30
+_COPY_SSH_ALIVE_INTERVAL = 30
+_COPY_SSH_ALIVE_COUNT_MAX = 6
+_COPY_RSYNC_IO_TIMEOUT = 600
+
+
+def _copy_ssh_transport(port):
+    """`rsync -e` transport with connect + keepalive timeouts applied."""
+    return (
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        f" -o ConnectTimeout={_COPY_SSH_CONNECT_TIMEOUT}"
+        f" -o ServerAliveInterval={_COPY_SSH_ALIVE_INTERVAL}"
+        f" -o ServerAliveCountMax={_COPY_SSH_ALIVE_COUNT_MAX}"
+        f" -p {port}"
+    )
 
 # rsync --info=progress2 emits lines like:
 #   "       16,712,704  35%   15.94MB/s    0:00:01 (xfr#1, to-chk=1/3)"
@@ -267,6 +299,90 @@ def update_copy_entry(tid, _persist=True, **fields):
         state[key] = entry
         _flush_copy_state_unlocked(force=_persist)
         return dict(entry)
+
+
+def reconcile_interrupted_copies():
+    """Mark orphaned 'copying' entries as interrupted at startup.
+
+    A copy runs in a thread inside the web worker and its rsync is a child of
+    that process, so both die with the process. Terminal states are only ever
+    written by that thread — if the service is restarted mid-copy (deploy via
+    update.sh, unattended-upgrades, reboot), the last progress tick stays on
+    disk as 'copying' forever and the UI hides the Copy button behind a
+    transfer that no longer exists.
+
+    Any 'copying' entry found at import time is therefore orphaned by
+    definition: no copy can outlive the process that started it. Rewriting it
+    to 'interrupted' unwedges the UI and tells the truth. Nothing is deleted
+    remotely — rsync is incremental, so retrying resumes from where it stopped.
+
+    Returns the list of torrent ids that were reconciled.
+    """
+    reconciled = []
+    with _copy_state_lock:
+        state = _ensure_copy_state_cache_unlocked()
+        for key, entry in state.items():
+            if (entry or {}).get("status") != "copying":
+                continue
+            pct = entry.get("progress_pct")
+            entry["status"] = "interrupted"
+            entry["finished_at"] = _now_iso()
+            entry["rate"] = None
+            entry["eta_seconds"] = None
+            entry["error_message"] = (
+                "Copy was interrupted before it finished — the dashboard "
+                "service stopped while it was running"
+                + (f" (reached {pct}%)" if isinstance(pct, int) else "")
+                + ". Already-transferred files are intact; starting the copy "
+                "again resumes from where it left off."
+            )
+            reconciled.append(key)
+        if reconciled:
+            _flush_copy_state_unlocked(force=True)
+    return reconciled
+
+
+def _log_interrupted_copies(keys):
+    """Write one event per reconciled copy. Runs off the import path because
+    _torrent_name does a Transmission RPC (up to ~13s if the daemon is still
+    starting), and boot must not block on the event log."""
+    for key in keys:
+        try:
+            tid = int(key)
+        except (TypeError, ValueError):
+            continue
+        try:
+            db.log_event(
+                "copy.interrupted",
+                "warn",
+                "Copy was interrupted by a dashboard restart; retry to resume",
+                torrent_id=tid,
+                torrent_name=_torrent_name(tid),
+            )
+        except Exception:
+            # Logging is best-effort; the state rewrite is what unwedges the UI.
+            pass
+
+
+def _run_startup_copy_reconcile():
+    """Startup hook for reconcile_interrupted_copies(). Never aborts boot —
+    a wedged state file must not stop the app that lets you fix it.
+
+    The state rewrite is synchronous so the UI is never served a stale
+    'copying'; only the event logging is deferred to a thread.
+    """
+    try:
+        reconciled = reconcile_interrupted_copies()
+    except Exception as e:
+        print(f"[startup] copy-state reconcile failed: {e}", file=sys.stderr)
+        return
+    if reconciled:
+        threading.Thread(
+            target=_log_interrupted_copies, args=(reconciled,), daemon=True,
+        ).start()
+
+
+_run_startup_copy_reconcile()
 
 
 def _sanitize_subfolder(s):
@@ -1176,9 +1292,7 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
                 update_copy_entry(tid, status="cancelled", finished_at=_now_iso())
                 return
 
-            ssh_opts_ms = (
-                f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p {port}"
-            )
+            ssh_opts_ms = _copy_ssh_transport(port)
             STDERR_MAX_LINES = 500
             cumulative_bytes = 0
 
@@ -1231,6 +1345,7 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
 
                 cmd_ms = [
                     "rsync", "-a", "-s", "--partial",
+                    f"--timeout={_COPY_RSYNC_IO_TIMEOUT}",
                     "--info=progress2", "--no-i-r",
                     *bwlimit_args,
                     "-e", ssh_opts_ms, "--",
@@ -1459,14 +1574,13 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
             update_copy_entry(tid, status="cancelled", finished_at=_now_iso())
             return
 
-        ssh_opts = (
-            f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p {port}"
-        )
+        ssh_opts = _copy_ssh_transport(port)
         cmd = [
             "rsync",
             "-a",
             "-s",
             "--partial",
+            f"--timeout={_COPY_RSYNC_IO_TIMEOUT}",
             "--info=progress2",
             "--no-i-r",
             *bwlimit_args,

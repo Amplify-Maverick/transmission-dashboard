@@ -3156,7 +3156,8 @@
                 if (res.ok) {
                     const entry = await res.json();
                     if (entry && (entry.status === 'copying' || entry.status === 'done' ||
-                                  entry.status === 'error' || entry.status === 'cancelled')) {
+                                  entry.status === 'error' || entry.status === 'cancelled' ||
+                                  entry.status === 'interrupted')) {
                         applyCopyStatus(entry);
                         if (entry.status === 'copying') startCopyPoll();
                     }
@@ -3231,6 +3232,25 @@
                     statusText = `Copy failed: ${entry.error_message || 'unknown error'}`;
                     copyStartBtn.hidden = false;
                     copyStartBtn.textContent = 'Retry';
+                    copyStopBtn.hidden = true;
+                    copyCancelBtn.textContent = 'Close';
+                    copyMediaTypeEl.disabled = false;
+                    copySubfolderEl.disabled = false;
+                    copyRenameEl.disabled = false;
+                    copyShowNameEl.disabled = false;
+                    copyShowYearEl.disabled = false;
+                    copyShowSeasonEl.disabled = false;
+                    setCopySeasonsListDisabled(false);
+                    copyDeleteEl.disabled = false;
+                    break;
+                case 'interrupted':
+                    // The worker died mid-copy (service restart / reboot).
+                    // rsync is incremental, so retrying resumes rather than
+                    // restarting — say so, since the percentage looks alarming.
+                    statusText = entry.error_message
+                        || 'Copy was interrupted before it finished. Retrying resumes from where it left off.';
+                    copyStartBtn.hidden = false;
+                    copyStartBtn.textContent = 'Resume copy';
                     copyStopBtn.hidden = true;
                     copyCancelBtn.textContent = 'Close';
                     copyMediaTypeEl.disabled = false;
