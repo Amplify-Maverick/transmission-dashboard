@@ -95,7 +95,7 @@
     // and clips the axis text. Falls back to VBW when the element isn't laid
     // out yet (e.g. a hidden tab); the next poll re-renders at real width.
     const W = Math.max(320, Math.round(el.clientWidth) || VBW);
-    const padL = 58, padR = 14, padT = 12, padB = 22;
+    const padR = 14, padT = 12, padB = 22;
     const fmtY = opts.fmtY || (v => String(Math.round(v)));
     const fmtX = opts.fmtX || (t => '');
     const fmtTip = opts.fmtTip || fmtY;
@@ -118,11 +118,21 @@
       if (p.v > vMax) vMax = p.v;
     }));
     vMax = Math.max(niceMax(vMax), opts.minYMax || 1);
+
+    // Size the left gutter to the widest y label instead of assuming one
+    // fits in a fixed 58px — "8.54 MB/s" doesn't, and the overflow is
+    // silently clipped at the SVG edge rather than pushing the plot over.
+    // .chart-axis is 10px monospace, so ~6px per character.
+    const gridN = 3;
+    const yLabels = [];
+    for (let i = 0; i <= gridN; i++) yLabels.push(String(fmtY(vMax * i / gridN)));
+    const widest = yLabels.reduce((a, s) => Math.max(a, s.length), 0);
+    const padL = Math.min(96, Math.max(34, Math.ceil(widest * 6.1) + 12));
+
     const sx = t => xMax === xMin ? padL
       : padL + (t - xMin) / (xMax - xMin) * (W - padL - padR);
     const sy = v => H - padB - (v / vMax) * (H - padT - padB);
 
-    const gridN = 3;
     let grid = '';
     for (let i = 0; i <= gridN; i++) {
       const gv = vMax * i / gridN;

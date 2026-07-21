@@ -105,8 +105,7 @@
                     <header class="system-card-header">
                         <h2 class="system-card-title">Transfer &amp; trends</h2>
                         <div class="chart-range" id="trend-range" role="tablist" aria-label="Time range">
-                            <button type="button" data-range="live" class="active">Live</button>
-                            <button type="button" data-range="1h">1h</button>
+                            <button type="button" data-range="1h" class="active">1h</button>
                             <button type="button" data-range="6h">6h</button>
                             <button type="button" data-range="24h">24h</button>
                             <button type="button" data-range="7d">7d</button>
@@ -411,9 +410,10 @@
             if (arr.length > max) arr.shift();
         }
 
-        // Time range for the trend charts: 'live' uses the buffers above;
-        // named ranges fetch downsampled history from the server.
-        let trendRange = 'live';
+        // Time range for the trend charts. Always a named range served from
+        // the sampler's history — the in-session buffers above now only feed
+        // the small sparklines on the CPU/Memory/Network cards.
+        let trendRange = '1h';
         let metricsTimer = null;
         let historySeries = null; // last fetched /api/metrics/history rows
         let lastStatsData = null; // last /api/stats payload (for distribution)
@@ -760,7 +760,9 @@
                 }, STATS_BUF_MAX);
                 renderDistribution(data);
                 renderCopiesDaily(data);
-                if (trendRange === 'live') { renderThroughputChart(); renderSwarmChart(); }
+                // The chart itself is history-driven, but its "now" subtitle
+                // comes from this poll.
+                renderThroughputChart();
             } catch (_) {} finally {
                 statsBusy = false;
             }
@@ -807,7 +809,6 @@
                     tx: (data.network || {}).tx_rate,
                 }, SYS_BUF_MAX);
                 renderSparks();
-                if (trendRange === 'live') renderLoadChart();
                 setLive(true);
                 clearError();
             } catch (err) {
@@ -831,13 +832,12 @@
         }
         const axisFmt = () => (t => fmtAxisTime(t, trendRange));
 
-        // Build {t,v} point arrays from either the live buffer or fetched
-        // history. Live buffers store t in ms; history stores epoch seconds.
+        // Live buffers store t in ms; history stores epoch seconds.
         function livePts(buf, key) { return buf.map(r => ({ t: r.t, v: r[key] })); }
+
         function histPts(key) {
             return (historySeries || []).map(r => ({ t: r.t * 1000, v: r[key] }));
         }
-        function usingHistory() { return trendRange !== 'live'; }
 
         function renderSparks() {
             if (!window.Charts) return;
@@ -849,36 +849,31 @@
 
         function renderThroughputChart() {
             if (!window.Charts) return;
-            const down = usingHistory() ? histPts('download_speed') : livePts(statsBuf, 'down');
-            const up = usingHistory() ? histPts('upload_speed') : livePts(statsBuf, 'up');
             Charts.areaLines($('chart-throughput'), [
-                { name: '↓ Download', color: '--blue', points: down },
-                { name: '↑ Upload', color: '--green', points: up },
+                { name: '↓ Download', color: '--blue', points: histPts('download_speed') },
+                { name: '↑ Upload', color: '--green', points: histPts('upload_speed') },
             ], { height: 200, fmtY: fmtRate, fmtX: axisFmt(), fmtTip: fmtRate });
+            // Current throughput, labelled "now" so it can't be misread as a
+            // figure for the selected range.
             const last = statsBuf[statsBuf.length - 1];
-            if (last && !usingHistory()) {
-                $('throughput-sub').textContent = `↓ ${fmtRate(last.down)} · ↑ ${fmtRate(last.up)}`;
-            } else {
-                $('throughput-sub').textContent = '';
-            }
+            $('throughput-sub').textContent = last
+                ? `now ↓ ${fmtRate(last.down)} · ↑ ${fmtRate(last.up)}` : '';
         }
 
         function renderSwarmChart() {
             if (!window.Charts) return;
-            const active = usingHistory() ? histPts('active_count') : livePts(statsBuf, 'active');
-            const peers = usingHistory() ? histPts('swarm_peers') : livePts(statsBuf, 'peers');
             Charts.areaLines($('chart-swarm'), [
-                { name: 'Active torrents', color: '--blue', points: active },
-                { name: 'Swarm peers', color: '--yellow', points: peers },
+                { name: 'Active torrents', color: '--blue', points: histPts('active_count') },
+                { name: 'Swarm peers', color: '--yellow', points: histPts('swarm_peers') },
             ], { height: 160, fmtY: v => String(Math.round(v)), fmtX: axisFmt(),
                  fmtTip: v => String(Math.round(v)) });
         }
 
         function renderLoadChart() {
             if (!window.Charts) return;
-            const cpu = usingHistory() ? histPts('cpu_percent') : livePts(sysBuf, 'cpu');
-            const mem = usingHistory() ? histPts('mem_percent') : livePts(sysBuf, 'mem');
-            const disk = usingHistory() ? histPts('disk_percent') : livePts(sysBuf, 'disk');
+            const cpu = histPts('cpu_percent');
+            const mem = histPts('mem_percent');
+            const disk = histPts('disk_percent');
             Charts.areaLines($('chart-load'), [
                 { name: 'CPU', color: '--blue', points: cpu },
                 { name: 'Memory', color: '--green', points: mem },
@@ -1238,13 +1233,8 @@
                 b.classList.toggle('active', b.dataset.range === range);
             });
             if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
-            if (range === 'live') {
-                historySeries = null;
-                renderTrendCharts();
-            } else {
-                fetchHistory(range);
-                metricsTimer = setInterval(() => fetchHistory(range), 60000);
-            }
+            fetchHistory(range);
+            metricsTimer = setInterval(() => fetchHistory(range), 60000);
         }
 
         document.getElementById('trend-range').addEventListener('click', ev => {
@@ -1258,6 +1248,9 @@
             pollStats();
             renderPerTorrent();   // show a state immediately, not a blank box
             fetchPerTorrent();
+            // The trend charts are history-only now, so they need their first
+            // fetch here rather than waiting for a range button to be clicked.
+            setTrendRange(trendRange);
             pollTimer = setInterval(poll, POLL_MS);
             tunnelTimer = setInterval(pollTunnel, TUNNEL_POLL_MS);
             statsTimer = setInterval(pollStats, STATS_POLL_MS);
@@ -1278,9 +1271,7 @@
                 if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
                 if (ttTimer) { clearInterval(ttTimer); ttTimer = null; }
             } else if (!pollTimer) {
-                start();
-                // Resume history polling if a persisted range was selected.
-                if (trendRange !== 'live') setTrendRange(trendRange);
+                start();   // re-arms the history poll for the selected range
             }
         });
 
