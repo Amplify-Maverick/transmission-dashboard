@@ -340,14 +340,11 @@
                         <div class="chart-controls" style="margin-bottom:8px">
                             <div class="chart-range" id="tt-view" role="tablist" aria-label="Chart view">
                                 <button type="button" data-view="top" class="active">Top 5 combined</button>
-                                <button type="button" data-view="all">Every torrent</button>
-                            </div>
-                            <div class="chart-range" id="tt-scale" role="tablist" aria-label="Panel scale" hidden>
-                                <button type="button" data-scale="shared" class="active">Shared scale</button>
-                                <button type="button" data-scale="own">Own scale</button>
+                                <button type="button" data-view="seeding">Seeding torrents</button>
                             </div>
                         </div>
                         <div class="chart-box chart-box--tall" id="chart-tt-series"></div>
+                        <div id="tt-seeding-list" hidden></div>
                     </div>
                 </section>
 
@@ -940,26 +937,40 @@
                            '--series-4', '--series-5'];
         let ttRange = '24h';
         let ttMetric = 'up';
-        let ttView = 'top';      // 'top' = combined lines, 'all' = one panel each
-        let ttShared = true;     // small-multiples y-scale
+        let ttView = 'top';      // 'top' = combined lines, 'seeding' = per-torrent list
         let ttData = null;
+        let ttSeeding = null;        // last /seeding payload
+        const ttOpen = new Set();    // hashes whose rows are expanded
+        const ttSeries = new Map();  // hash -> points, for the current range+metric
 
         // Every way this card can be empty, each with its own message —
         // "Collecting data…" for all of them made a disabled sampler look
         // identical to a swarm that simply wasn't transferring.
         function ttEmptyMessage() {
-            if (!ttData) return 'Loading…';
-            if (ttData.sampler_enabled === false) {
+            // Whichever view is active supplies the flags — the list and the
+            // charts load from different endpoints.
+            const d = ttView === 'seeding' ? ttSeeding : ttData;
+            if (!d) return 'Loading…';
+            if (d.sampler_enabled === false) {
                 return 'Sampler disabled — set METRICS_SAMPLE_INTERVAL to enable';
             }
-            if (!ttData.has_history) return 'Collecting data…';
+            if (!d.has_history) return 'Collecting data…';
             const label = ttRange === '1h' ? 'the last hour' : `the last ${ttRange}`;
             const verb = ttMetric === 'up' ? 'uploaded' : 'downloaded';
             return `Nothing ${verb} in ${label}`;
         }
 
+        // The combined chart and the seeding list occupy the same slot.
+        function applyTtView() {
+            const seeding = ttView === 'seeding';
+            $('chart-tt-series').hidden = seeding;
+            $('tt-seeding-list').hidden = !seeding;
+            $('tt-series-sub').textContent = '';
+        }
+
         function renderPerTorrent() {
             if (!window.Charts) return;
+            if (ttView === 'seeding') { renderSeedingList(); }
             const totalsEl = $('chart-tt-totals');
             const seriesEl = $('chart-tt-series');
             const key = ttMetric === 'up' ? 'up_bytes' : 'down_bytes';
@@ -1005,69 +1016,190 @@
                 ? `${(step / 3600).toFixed(step % 3600 ? 1 : 0)} h`
                 : `${Math.round(step / 60)} min`;
 
-            if (ttView === 'all') {
-                // One panel per torrent. Colored by rank for the first five so
-                // the grid ties back to the bars above; the rest share slot 1.
-                const totalFor = {};
-                totals.forEach(r => { totalFor[r.hash] = r[key] || 0; });
-                // Tail panels go grey, matching the bars above — past rank 5
-                // the colour carries no identity, and reusing series-1 would
-                // make blue mean both "rank 1" and "everything else".
-                Charts.smallMultiples(seriesEl, series.map((s, i) => ({
-                    label: s.name,
-                    value: totalFor[s.hash] || 0,
-                    color: i < TT_COLORS.length ? TT_COLORS[i] : '--grey',
-                    points: s.points,
-                })), { fmtValue: fmtBytes, shared: ttShared, height: 38 });
-                const capped = ttData.truncated ? ' · capped' : '';
-                $('tt-series-sub').textContent =
-                    `${series.length} torrents · per ${per}${capped}`;
-            } else {
-                Charts.areaLines(seriesEl, series, {
-                    height: 200, fill: false, fmtY: fmtBytes,
-                    fmtX: t => fmtAxisTime(t, ttRange), fmtTip: fmtBytes,
-                });
-                $('tt-series-sub').textContent = series.length
-                    ? `top ${series.length} · per ${per}` : '';
-            }
+            Charts.areaLines(seriesEl, series, {
+                height: 200, fill: false, fmtY: fmtBytes,
+                fmtX: t => fmtAxisTime(t, ttRange), fmtTip: fmtBytes,
+            });
+            $('tt-series-sub').textContent = series.length
+                ? `top ${series.length} · per ${per}` : '';
         }
+
+        // ---- seeding list ----
+        // Rows come from live daemon state, so a torrent that is seeding but
+        // hasn't been asked for a byte still gets a row (with a zero total).
+        // Each row's graph is fetched only when it's first expanded.
+
+        function ttRowMeta(r) {
+            const bits = [];
+            if (r.peers) bits.push(`${r.peers} peer${r.peers === 1 ? '' : 's'}`);
+            if (r.ratio != null && r.ratio >= 0) bits.push(`ratio ${fmtRatio(r.ratio)}`);
+            return bits.join(' · ');
+        }
+
+        function renderSeedingList() {
+            const el = $('tt-seeding-list');
+            if (!ttSeeding) {
+                el.innerHTML = `<div class="chart-empty">${ttEmptyMessage()}</div>`;
+                return;
+            }
+            const rows = ttSeeding.torrents || [];
+            if (!rows.length) {
+                el.innerHTML = '<div class="chart-empty">No torrents are seeding right now</div>';
+                return;
+            }
+            const verb = ttMetric === 'up' ? 'uploaded' : 'downloaded';
+            el.innerHTML = `<div class="tl-list">` + rows.map((r, i) => {
+                const open = ttOpen.has(r.hash);
+                const meta = ttRowMeta(r);
+                return `<div class="tl-row" data-hash="${escapeHtml(r.hash)}">` +
+                    `<button type="button" class="tl-head" aria-expanded="${open}" ` +
+                    `aria-controls="tl-panel-${i}">` +
+                    `<span class="tl-caret" aria-hidden="true"></span>` +
+                    `<span class="tl-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>` +
+                    (meta ? `<span class="tl-meta">${escapeHtml(meta)}</span>` : '') +
+                    `<span class="tl-bytes${r.bytes ? '' : ' tl-zero'}">${escapeHtml(fmtBytes(r.bytes))}</span>` +
+                    `</button>` +
+                    `<div class="tl-panel" id="tl-panel-${i}"${open ? '' : ' hidden'}></div>` +
+                    `</div>`;
+            }).join('') + `</div>` +
+                `<div class="tl-foot">${rows.length} seeding · ` +
+                `${ttSeeding.active} ${verb} in the last ${ttRange === '1h' ? 'hour' : ttRange}</div>`;
+            // Re-render the graphs of any rows that were already open.
+            rows.forEach(r => { if (ttOpen.has(r.hash)) renderRowGraph(r.hash); });
+        }
+
+        function rowPanel(hash) {
+            const row = document.querySelector(`.tl-row[data-hash="${CSS.escape(hash)}"]`);
+            return row ? row.querySelector('.tl-panel') : null;
+        }
+
+        function renderRowGraph(hash) {
+            const panel = rowPanel(hash);
+            if (!panel) return;
+            const entry = ttSeries.get(hash);
+            if (!entry) { panel.innerHTML = '<div class="chart-empty">Loading…</div>'; return; }
+            if (entry.error) {
+                panel.innerHTML = '<div class="chart-empty">Could not load this graph</div>';
+                return;
+            }
+            if (!entry.total) {
+                const verb = ttMetric === 'up' ? 'uploaded' : 'downloaded';
+                panel.innerHTML =
+                    `<div class="chart-empty">Nothing ${verb} in this range</div>`;
+                return;
+            }
+            const box = document.createElement('div');
+            box.className = 'chart-box';
+            panel.innerHTML = '';
+            panel.appendChild(box);
+            Charts.areaLines(box, [{
+                name: ttMetric === 'up' ? 'Uploaded' : 'Downloaded',
+                color: '--series-1',
+                points: entry.points.map(p => ({ t: p.t * 1000, v: p.v })),
+            }], { height: 150, fmtY: fmtBytes,
+                  fmtX: t => fmtAxisTime(t, ttRange), fmtTip: fmtBytes });
+        }
+
+        async function fetchRowSeries(hash) {
+            // Remember the range+metric this was fetched for; a stale reply
+            // arriving after the user switches must not paint the new view.
+            const forRange = ttRange, forMetric = ttMetric;
+            try {
+                const res = await fetch(
+                    `/api/metrics/torrents/${encodeURIComponent(hash)}/series`
+                    + `?range=${encodeURIComponent(forRange)}`
+                    + `&metric=${encodeURIComponent(forMetric)}`, { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('http ' + res.status);
+                const data = await res.json();
+                if (data.ok === false) throw new Error(data.error || 'failed');
+                if (forRange !== ttRange || forMetric !== ttMetric) return;
+                ttSeries.set(hash, { points: data.points || [], total: data.total || 0 });
+            } catch (_) {
+                if (forRange !== ttRange || forMetric !== ttMetric) return;
+                ttSeries.set(hash, { error: true });
+            }
+            if (ttOpen.has(hash)) renderRowGraph(hash);
+        }
+
+        async function fetchSeedingList() {
+            const forRange = ttRange, forMetric = ttMetric;
+            try {
+                const res = await fetch('/api/metrics/torrents/seeding?range='
+                    + encodeURIComponent(forRange) + '&metric='
+                    + encodeURIComponent(forMetric), { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.ok === false) return;
+                if (data.range !== ttRange || data.metric !== ttMetric) return;
+                ttSeeding = data;
+                renderSeedingList();
+            } catch (_) {}
+        }
+
+        document.getElementById('tt-seeding-list').addEventListener('click', ev => {
+            const head = ev.target.closest('.tl-head');
+            if (!head) return;
+            const row = head.closest('.tl-row');
+            const hash = row && row.dataset.hash;
+            if (!hash) return;
+            const panel = row.querySelector('.tl-panel');
+            const open = !ttOpen.has(hash);
+            if (open) ttOpen.add(hash); else ttOpen.delete(hash);
+            head.setAttribute('aria-expanded', String(open));
+            panel.hidden = !open;
+            if (!open) return;
+            renderRowGraph(hash);                       // shows Loading… if cold
+            if (!ttSeries.has(hash)) fetchRowSeries(hash);
+        });
 
         async function fetchPerTorrent() {
             try {
                 const res = await fetch('/api/metrics/torrents?range='
                     + encodeURIComponent(ttRange) + '&metric='
-                    + encodeURIComponent(ttMetric) + '&series='
-                    + encodeURIComponent(ttView), { cache: 'no-store' });
+                    + encodeURIComponent(ttMetric), { cache: 'no-store' });
                 if (res.status === 401) { unauthorizedRedirect(); return; }
                 if (!res.ok) return;
                 const data = await res.json();
                 if (data.ok === false) return;
                 // Ignore a response the user has already navigated away from.
-                if (data.range !== ttRange || data.metric !== ttMetric
-                    || data.series_mode !== ttView) return;
+                if (data.range !== ttRange || data.metric !== ttMetric) return;
                 ttData = data;
                 renderPerTorrent();
             } catch (_) {}
         }
 
+        // Range and direction both invalidate every cached row graph — the
+        // points are only valid for the range+metric they were fetched for.
+        function ttReload() {
+            ttSeries.clear();
+            fetchPerTorrent();
+            if (ttView === 'seeding') {
+                renderSeedingList();   // repaint rows with "Loading…" panels
+                fetchSeedingList();
+                ttOpen.forEach(h => fetchRowSeries(h));
+            }
+        }
+
         document.getElementById('tt-range').addEventListener('click', ev => {
             const btn = ev.target.closest('button[data-range]');
-            if (!btn) return;
+            if (!btn || btn.dataset.range === ttRange) return;
             ttRange = btn.dataset.range;
             document.querySelectorAll('#tt-range button').forEach(b => {
                 b.classList.toggle('active', b.dataset.range === ttRange);
             });
-            fetchPerTorrent();
+            ttReload();
         });
 
         document.getElementById('tt-metric').addEventListener('click', ev => {
             const btn = ev.target.closest('button[data-metric]');
-            if (!btn) return;
+            if (!btn || btn.dataset.metric === ttMetric) return;
             ttMetric = btn.dataset.metric;
             document.querySelectorAll('#tt-metric button').forEach(b => {
                 b.classList.toggle('active', b.dataset.metric === ttMetric);
             });
-            fetchPerTorrent();
+            ttReload();
         });
 
         document.getElementById('tt-view').addEventListener('click', ev => {
@@ -1077,25 +1209,9 @@
             document.querySelectorAll('#tt-view button').forEach(b => {
                 b.classList.toggle('active', b.dataset.view === ttView);
             });
-            // The scale toggle only means anything for the panel grid.
-            $('tt-scale').hidden = ttView !== 'all';
-            // The two views ask the server for different series, so the
-            // cached payload can't be reused — clear it or the grid would
-            // render the top 5 for a moment.
-            ttData = null;
+            applyTtView();
             renderPerTorrent();
-            fetchPerTorrent();
-        });
-
-        document.getElementById('tt-scale').addEventListener('click', ev => {
-            const btn = ev.target.closest('button[data-scale]');
-            if (!btn) return;
-            ttShared = btn.dataset.scale === 'shared';
-            document.querySelectorAll('#tt-scale button').forEach(b => {
-                b.classList.toggle('active',
-                    (b.dataset.scale === 'shared') === ttShared);
-            });
-            renderPerTorrent();   // purely a display change, no refetch
+            if (ttView === 'seeding' && !ttSeeding) fetchSeedingList();
         });
 
         async function fetchHistory(range) {
@@ -1141,7 +1257,12 @@
             tunnelTimer = setInterval(pollTunnel, TUNNEL_POLL_MS);
             statsTimer = setInterval(pollStats, STATS_POLL_MS);
             // Buckets are 15 min wide, so anything faster is wasted work.
-            ttTimer = setInterval(fetchPerTorrent, 60000);
+            ttTimer = setInterval(() => {
+                fetchPerTorrent();
+                // The seeding set is live daemon state, so refresh it too —
+                // but leave expanded graphs alone unless their row is gone.
+                if (ttView === 'seeding') fetchSeedingList();
+            }, 60000);
         }
 
         document.addEventListener('visibilitychange', () => {

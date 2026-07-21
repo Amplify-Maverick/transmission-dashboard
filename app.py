@@ -2545,10 +2545,9 @@ def api_metrics_history():
 # Colors are assigned per rank on the client, so cap the combined chart at
 # the number of validated categorical slots the stylesheet defines.
 _TORRENT_SERIES_MAX = 5
-# Cap on small-multiple panels. Each is one row plus its points, so this
-# bounds both the JSON payload and the number of SVGs the Pi's browser has
-# to lay out at once.
-_TORRENT_PANEL_MAX = 60
+# The seeding list carries no points per row — each row's graph is fetched
+# only when expanded — so this only bounds the totals lookup behind it.
+_SEEDING_LIST_MAX = 500
 
 
 @app.route("/api/metrics/torrents")
@@ -2564,29 +2563,20 @@ def api_metrics_torrents():
     if metric not in ("up", "down"):
         return jsonify({"ok": False, "error": "invalid metric"}), 400
     field = "up_bytes" if metric == "up" else "down_bytes"
-    # "top" plots the leaders on one shared axis; "all" gives every torrent
-    # with traffic its own small-multiple panel. The panels are ~200px wide,
-    # so they get fewer points than the full-width combined chart.
-    mode = request.args.get("series", "top")
-    if mode not in ("top", "all"):
-        return jsonify({"ok": False, "error": "invalid series"}), 400
-    default_limit = _TORRENT_PANEL_MAX if mode == "all" else 8
     try:
-        limit = min(_TORRENT_PANEL_MAX,
-                    max(1, int(request.args.get("limit", default_limit))))
+        limit = min(20, max(1, int(request.args.get("limit", 8))))
     except (TypeError, ValueError):
-        limit = default_limit
-    buckets = 60 if mode == "all" else 120
+        limit = 8
 
     since = int(time.time()) - span
     try:
         totals = db.get_torrent_traffic_totals(since, limit=limit, field=field)
-        plotted = totals if mode == "all" else totals[:_TORRENT_SERIES_MAX]
+        plotted = totals[:_TORRENT_SERIES_MAX]
         series_map = db.get_torrent_traffic_series(
-            since, [r["hash"] for r in plotted], buckets=buckets, field=field)
+            since, [r["hash"] for r in plotted], buckets=120, field=field)
         # The plotted step is wider than one storage bucket on long ranges;
         # the chart labels itself with this, so report what's actually drawn.
-        _, step_secs = db.traffic_series_grid(since, buckets)
+        _, step_secs = db.traffic_series_grid(since, 120)
         # Lets the empty state say which kind of empty this is.
         has_history = bool(totals) or db.has_torrent_traffic()
     except Exception as e:
@@ -2605,10 +2595,6 @@ def api_metrics_torrents():
         "step_secs": step_secs,
         "has_history": has_history,
         "sampler_enabled": config.METRICS_SAMPLE_INTERVAL > 0,
-        "series_mode": mode,
-        # True when torrents were dropped by the cap, so the UI can say so
-        # rather than quietly showing a partial picture.
-        "truncated": len(totals) >= limit,
         "totals": totals,
         "series": [
             {
@@ -2618,6 +2604,113 @@ def api_metrics_torrents():
             }
             for r in plotted
         ],
+    })
+
+
+# Transmission status codes for "seeding": 5 is queued to seed, 6 is
+# actively seeding. Matches how /api/stats buckets the status mix.
+_SEEDING_STATUSES = (5, 6)
+# Sanity filter on the URL segment, not a length assertion — real infohashes
+# are 40 hex chars, but the DB is the authority on which ones exist and the
+# value only ever reaches SQL as a bound parameter. Hex-only is what matters:
+# it keeps path-ish junk out of the route.
+_HASH_RE = re.compile(r"^[0-9a-fA-F]{1,64}$")
+
+
+@app.route("/api/metrics/torrents/seeding")
+@login_required
+def api_metrics_seeding():
+    """Every torrent currently seeding, with how much it moved in the range.
+
+    The list comes from live daemon state rather than the traffic history, so
+    a torrent that is seeding but hasn't been asked for a byte still appears
+    (with a zero total) instead of silently missing."""
+    rng = request.args.get("range", "24h")
+    span = _METRICS_RANGES.get(rng)
+    if span is None:
+        return jsonify({"ok": False, "error": "invalid range"}), 400
+    metric = request.args.get("metric", "up")
+    if metric not in ("up", "down"):
+        return jsonify({"ok": False, "error": "invalid metric"}), 400
+    field = "up_bytes" if metric == "up" else "down_bytes"
+
+    since = int(time.time()) - span
+    try:
+        torrents = client.get_stats_torrents() or []
+        # No limit: this is joined against the live seeding set, which bounds
+        # it, and a torrent missing from here would look like it never seeded.
+        totals = db.get_torrent_traffic_totals(
+            since, limit=_SEEDING_LIST_MAX, field=field)
+        has_history = bool(totals) or db.has_torrent_traffic()
+    except Exception as e:
+        return _err(e)
+
+    by_hash = {r["hash"]: r for r in totals}
+    custom = db.get_custom_names_map()
+    rows = []
+    for t in torrents:
+        if t.get("status") not in _SEEDING_STATUSES:
+            continue
+        h = t.get("hashString")
+        if not h:
+            continue
+        rec = by_hash.get(h) or {}
+        rows.append({
+            "hash": h,
+            "id": t.get("id"),
+            "name": custom.get(h) or t.get("name") or h[:12],
+            "bytes": rec.get(field) or 0,
+            "peers": int(t.get("peersConnected") or 0),
+            "uploaded_ever": int(t.get("uploadedEver") or 0),
+            "ratio": t.get("uploadRatio"),
+        })
+    # Movers first; the idle tail keeps a stable alphabetical order so rows
+    # don't shuffle under the user between polls.
+    rows.sort(key=lambda r: (-r["bytes"], (r["name"] or "").lower()))
+    return jsonify({
+        "ok": True,
+        "range": rng,
+        "metric": metric,
+        "has_history": has_history,
+        "sampler_enabled": config.METRICS_SAMPLE_INTERVAL > 0,
+        "count": len(rows),
+        "active": sum(1 for r in rows if r["bytes"] > 0),
+        "torrents": rows,
+    })
+
+
+@app.route("/api/metrics/torrents/<hash>/series")
+@login_required
+def api_metrics_torrent_series(hash):
+    """One torrent's transfer series — fetched when its row is expanded, so
+    a long seeding list doesn't pay for graphs nobody opened."""
+    if not _HASH_RE.match(hash or ""):
+        return jsonify({"ok": False, "error": "invalid hash"}), 400
+    rng = request.args.get("range", "24h")
+    span = _METRICS_RANGES.get(rng)
+    if span is None:
+        return jsonify({"ok": False, "error": "invalid range"}), 400
+    metric = request.args.get("metric", "up")
+    if metric not in ("up", "down"):
+        return jsonify({"ok": False, "error": "invalid metric"}), 400
+    field = "up_bytes" if metric == "up" else "down_bytes"
+
+    since = int(time.time()) - span
+    try:
+        series = db.get_torrent_traffic_series(
+            since, [hash], buckets=120, field=field)
+        _, step_secs = db.traffic_series_grid(since, 120)
+    except Exception as e:
+        return _err(e)
+    points = series.get(hash, [])
+    return jsonify({
+        "ok": True,
+        "hash": hash,
+        "range": rng,
+        "metric": metric,
+        "step_secs": step_secs,
+        "total": sum(p["v"] for p in points),
+        "points": points,
     })
 
 

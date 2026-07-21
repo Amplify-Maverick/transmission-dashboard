@@ -284,79 +284,118 @@ class TorrentTrafficTests(unittest.TestCase):
         self.assertEqual(len(data["totals"]), 9)
         self.assertEqual(len(data["series"]), app._TORRENT_SERIES_MAX)
 
-    # ---- per-torrent panels (series=all) ----
+    # ---- seeding list + per-row series ----
 
-    def test_series_all_returns_a_panel_for_every_torrent(self):
-        """The combined chart caps at 5 for colour reasons; the panel grid
-        must not — the whole point is seeing every torrent."""
+    def _seeding(self, hash, name, status=6, up=0, peers=0):
+        return {"hashString": hash, "name": name, "status": status,
+                "uploadedEver": up, "downloadedEver": 0,
+                "peersConnected": peers, "uploadRatio": 1.5, "id": 1}
+
+    def test_seeding_list_includes_idle_seeders(self):
+        """The list is live daemon state, not traffic history — a torrent
+        seeding to nobody must still appear, with a zero total, instead of
+        vanishing because it has no rows."""
         now = int(__import__("time").time())
-        db.add_torrent_traffic(now - 60, [
-            (f"h{i}", f"T{i}", 1000 - i, 0) for i in range(12)])
+        db.add_torrent_traffic(now - 60, [("aa", "A", 900, 0)])
+        live = [self._seeding("aa", "A", peers=3),
+                self._seeding("idle", "Idle One")]
+        with patch.object(app.client, "get_stats_torrents", return_value=live):
+            data = self.client.get(
+                "/api/metrics/torrents/seeding?range=24h").get_json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["active"], 1)
+        rows = {r["hash"]: r for r in data["torrents"]}
+        self.assertEqual(rows["aa"]["bytes"], 900)
+        self.assertEqual(rows["aa"]["peers"], 3)
+        self.assertEqual(rows["idle"]["bytes"], 0)
+
+    def test_seeding_list_excludes_non_seeding_states(self):
+        live = [self._seeding("seed", "Seeding", status=6),
+                self._seeding("queued", "Queued to seed", status=5),
+                self._seeding("dl", "Downloading", status=4),
+                self._seeding("stopped", "Stopped", status=0)]
+        with patch.object(app.client, "get_stats_torrents", return_value=live):
+            data = self.client.get(
+                "/api/metrics/torrents/seeding?range=24h").get_json()
+        self.assertEqual({r["hash"] for r in data["torrents"]}, {"seed", "queued"})
+
+    def test_seeding_list_orders_movers_first_then_alphabetical(self):
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [("busy", "Busy", 500, 0)])
+        live = [self._seeding("zzz", "Zebra"), self._seeding("aaa", "Apple"),
+                self._seeding("busy", "Busy")]
+        with patch.object(app.client, "get_stats_torrents", return_value=live):
+            data = self.client.get(
+                "/api/metrics/torrents/seeding?range=24h").get_json()
+        self.assertEqual([r["name"] for r in data["torrents"]],
+                         ["Busy", "Apple", "Zebra"])
+
+    def test_seeding_list_uses_the_custom_name(self):
+        live = [self._seeding("aa", "Raw name")]
+        with patch.object(app.client, "get_stats_torrents", return_value=live), \
+             patch.object(db, "get_custom_names_map", return_value={"aa": "Nice"}):
+            data = self.client.get(
+                "/api/metrics/torrents/seeding?range=24h").get_json()
+        self.assertEqual(data["torrents"][0]["name"], "Nice")
+
+    def test_seeding_list_survives_a_dead_daemon(self):
+        with patch.object(app.client, "get_stats_torrents",
+                          side_effect=RuntimeError("rpc down")):
+            res = self.client.get("/api/metrics/torrents/seeding?range=24h")
+        self.assertNotEqual(res.status_code, 200)
+
+    def test_row_series_returns_one_torrents_points(self):
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [("aa", "A", 900, 5), ("bb", "B", 100, 0)])
         data = self.client.get(
-            "/api/metrics/torrents?range=24h&series=all").get_json()
-        self.assertEqual(data["series_mode"], "all")
-        self.assertEqual(len(data["series"]), 12)
-        self.assertEqual(len(data["totals"]), 12)
-        self.assertTrue(all(s["points"] for s in data["series"]))
+            "/api/metrics/torrents/aa/series?range=24h").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["hash"], "aa")
+        self.assertEqual(data["total"], 900)
+        self.assertEqual(sum(p["v"] for p in data["points"]), 900)
 
-    def test_series_top_still_caps_at_five(self):
-        now = int(__import__("time").time())
-        db.add_torrent_traffic(now - 60, [
-            (f"h{i}", f"T{i}", 1000 - i, 0) for i in range(12)])
-        data = self.client.get("/api/metrics/torrents?range=24h").get_json()
-        self.assertEqual(data["series_mode"], "top")
-        self.assertEqual(len(data["series"]), app._TORRENT_SERIES_MAX)
-
-    def test_panel_grid_is_capped_and_says_so(self):
-        """A client with hundreds of torrents must not be sent every one."""
-        now = int(__import__("time").time())
-        n = app._TORRENT_PANEL_MAX + 10
-        db.add_torrent_traffic(now - 60, [
-            (f"h{i:04}", f"T{i}", n - i, 0) for i in range(n)])
+    def test_row_series_is_zero_filled_for_an_idle_torrent(self):
+        """An expanded idle seeder gets a flat zero line, not an error."""
         data = self.client.get(
-            "/api/metrics/torrents?range=24h&series=all").get_json()
-        self.assertEqual(len(data["series"]), app._TORRENT_PANEL_MAX)
-        self.assertTrue(data["truncated"])
+            "/api/metrics/torrents/abcdef/series?range=24h").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["total"], 0)
+        self.assertTrue(data["points"])
+        self.assertTrue(all(p["v"] == 0 for p in data["points"]))
 
-    def test_not_truncated_when_everything_fits(self):
+    def test_row_series_honours_the_metric(self):
         now = int(__import__("time").time())
-        db.add_torrent_traffic(now - 60, [("aa", "A", 100, 0)])
-        data = self.client.get(
-            "/api/metrics/torrents?range=24h&series=all").get_json()
-        self.assertFalse(data["truncated"])
+        db.add_torrent_traffic(now - 60, [("aa", "A", 900, 7)])
+        up = self.client.get(
+            "/api/metrics/torrents/aa/series?range=24h&metric=up").get_json()
+        down = self.client.get(
+            "/api/metrics/torrents/aa/series?range=24h&metric=down").get_json()
+        self.assertEqual(up["total"], 900)
+        self.assertEqual(down["total"], 7)
 
-    def test_panels_align_with_their_totals(self):
-        """The grid labels each panel with its total, looked up by hash —
-        so the ordering the server sends has to be self-consistent."""
-        now = int(__import__("time").time())
-        db.add_torrent_traffic(now - 60, [
-            ("aa", "A", 900, 0), ("bb", "B", 300, 0), ("cc", "C", 100, 0)])
-        data = self.client.get(
-            "/api/metrics/torrents?range=24h&series=all").get_json()
-        totals = {r["hash"]: r["up_bytes"] for r in data["totals"]}
-        for s in data["series"]:
-            self.assertIn(s["hash"], totals)
-            self.assertEqual(sum(p["v"] for p in s["points"]), totals[s["hash"]])
+    def test_row_series_rejects_a_bad_hash(self):
+        for bad in ("../etc", "zz!!", "", "x" * 65):
+            res = self.client.get(f"/api/metrics/torrents/{bad}/series?range=24h")
+            self.assertIn(res.status_code, (400, 404), bad)
 
-    def test_series_all_uses_fewer_points_per_panel(self):
-        """Panels are ~200px wide; sending 120 points each would bloat the
-        payload for no visible gain."""
-        now = int(__import__("time").time())
-        db.add_torrent_traffic(now - 60, [("aa", "A", 100, 0)])
-        top = self.client.get("/api/metrics/torrents?range=30d").get_json()
-        grid = self.client.get(
-            "/api/metrics/torrents?range=30d&series=all").get_json()
-        self.assertLess(len(grid["series"][0]["points"]),
-                        len(top["series"][0]["points"]))
-        self.assertGreater(grid["step_secs"], top["step_secs"])
+    def test_row_series_rejects_bad_range_and_metric(self):
+        self.assertEqual(self.client.get(
+            "/api/metrics/torrents/aa/series?range=nope").status_code, 400)
+        self.assertEqual(self.client.get(
+            "/api/metrics/torrents/aa/series?metric=sideways").status_code, 400)
+
+    def test_seeding_endpoints_require_login(self):
+        with self.client.session_transaction() as s:
+            s.clear()
+        for url in ("/api/metrics/torrents/seeding?range=24h",
+                    "/api/metrics/torrents/aa/series?range=24h"):
+            self.assertIn(self.client.get(url).status_code, (302, 401), url)
 
     def test_endpoint_rejects_bad_args(self):
         self.assertEqual(
             self.client.get("/api/metrics/torrents?range=nope").status_code, 400)
         self.assertEqual(
             self.client.get("/api/metrics/torrents?metric=sideways").status_code, 400)
-        self.assertEqual(
-            self.client.get("/api/metrics/torrents?series=some").status_code, 400)
 
     def test_endpoint_requires_login(self):
         with self.client.session_transaction() as s:
