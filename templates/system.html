@@ -314,6 +314,33 @@
                     </div>
                 </section>
 
+                <section class="system-card system-card-wide" id="card-per-torrent">
+                    <header class="system-card-header">
+                        <h2 class="system-card-title">Per-torrent transfer</h2>
+                        <div class="chart-controls">
+                            <div class="chart-range" id="tt-metric" role="tablist" aria-label="Direction">
+                                <button type="button" data-metric="up" class="active">Uploaded</button>
+                                <button type="button" data-metric="down">Downloaded</button>
+                            </div>
+                            <div class="chart-range" id="tt-range" role="tablist" aria-label="Time range">
+                                <button type="button" data-range="1h">1h</button>
+                                <button type="button" data-range="6h">6h</button>
+                                <button type="button" data-range="24h" class="active">24h</button>
+                                <button type="button" data-range="7d">7d</button>
+                                <button type="button" data-range="30d">30d</button>
+                            </div>
+                        </div>
+                    </header>
+                    <div class="chart-block">
+                        <h3 class="chart-title">Top torrents <span class="chart-sub" id="tt-total-sub"></span></h3>
+                        <div class="chart-box" id="chart-tt-totals"></div>
+                    </div>
+                    <div class="chart-block">
+                        <h3 class="chart-title">Over time <span class="chart-sub" id="tt-series-sub"></span></h3>
+                        <div class="chart-box chart-box--tall" id="chart-tt-series"></div>
+                    </div>
+                </section>
+
                 <section class="system-card system-card-wide" id="card-media-transfers">
                     <header class="system-card-header">
                         <h2 class="system-card-title">Media transfers</h2>
@@ -383,6 +410,7 @@
         let metricsTimer = null;
         let historySeries = null; // last fetched /api/metrics/history rows
         let lastStatsData = null; // last /api/stats payload (for distribution)
+        let ttTimer = null;       // per-torrent transfer refresh
 
         const errorEl = document.getElementById('system-error');
 
@@ -895,6 +923,100 @@
                 { color: '--green', fmtValue: fmtBytes });
         }
 
+        // ---- per-torrent transfer ----
+        // Colors are assigned by rank within the response and the legend
+        // always names every series, so identity never rests on color alone.
+        const TT_COLORS = ['--series-1', '--series-2', '--series-3',
+                           '--series-4', '--series-5'];
+        let ttRange = '24h';
+        let ttMetric = 'up';
+        let ttData = null;
+
+        function renderPerTorrent() {
+            if (!window.Charts) return;
+            const totalsEl = $('chart-tt-totals');
+            const seriesEl = $('chart-tt-series');
+            if (!ttData) {
+                totalsEl.innerHTML = '<div class="chart-empty">Collecting data…</div>';
+                seriesEl.innerHTML = '<div class="chart-empty">Collecting data…</div>';
+                $('tt-total-sub').textContent = '';
+                $('tt-series-sub').textContent = '';
+                return;
+            }
+            const key = ttMetric === 'up' ? 'up_bytes' : 'down_bytes';
+            const totals = (ttData.totals || []).filter(r => (r[key] || 0) > 0);
+            // The top N plotted below get their series color here too, so the
+            // two charts read as one; the tail stays neutral grey.
+            const colorFor = h => {
+                const i = (ttData.series || []).findIndex(s => s.hash === h);
+                return i >= 0 && i < TT_COLORS.length ? TT_COLORS[i] : '--grey';
+            };
+            Charts.barsH(totalsEl, totals.map(r => ({
+                label: r.display_name, value: r[key], color: colorFor(r.hash),
+            })), { fmtValue: fmtBytes });
+
+            const sum = totals.reduce((a, r) => a + (r[key] || 0), 0);
+            const verb = ttMetric === 'up' ? 'uploaded' : 'downloaded';
+            $('tt-total-sub').textContent = sum
+                ? `${fmtBytes(sum)} ${verb} · ${totals.length} torrents` : '';
+
+            const series = (ttData.series || []).map((s, i) => ({
+                name: s.name,
+                color: TT_COLORS[i % TT_COLORS.length],
+                points: (s.points || []).map(p => ({ t: p.t * 1000, v: p.v })),
+            }));
+            Charts.areaLines(seriesEl, series, {
+                height: 200, fill: false, fmtY: fmtBytes,
+                fmtX: t => fmtAxisTime(t, ttRange), fmtTip: fmtBytes,
+            });
+            // Label the step actually plotted, not the storage bucket — the
+            // long ranges aggregate several buckets into one point.
+            // Minutes until they'd read awkwardly — the step is a multiple of
+            // 15 min, so "75 min" is honest where "1 h" would be rounded off.
+            const step = ttData.step_secs || ttData.bucket_secs || 900;
+            const per = step >= 7200
+                ? `${(step / 3600).toFixed(step % 3600 ? 1 : 0)} h`
+                : `${Math.round(step / 60)} min`;
+            $('tt-series-sub').textContent = series.length
+                ? `top ${series.length} · per ${per}` : '';
+        }
+
+        async function fetchPerTorrent() {
+            try {
+                const res = await fetch('/api/metrics/torrents?range='
+                    + encodeURIComponent(ttRange) + '&metric='
+                    + encodeURIComponent(ttMetric), { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.ok === false) return;
+                // Ignore a response the user has already navigated away from.
+                if (data.range !== ttRange || data.metric !== ttMetric) return;
+                ttData = data;
+                renderPerTorrent();
+            } catch (_) {}
+        }
+
+        document.getElementById('tt-range').addEventListener('click', ev => {
+            const btn = ev.target.closest('button[data-range]');
+            if (!btn) return;
+            ttRange = btn.dataset.range;
+            document.querySelectorAll('#tt-range button').forEach(b => {
+                b.classList.toggle('active', b.dataset.range === ttRange);
+            });
+            fetchPerTorrent();
+        });
+
+        document.getElementById('tt-metric').addEventListener('click', ev => {
+            const btn = ev.target.closest('button[data-metric]');
+            if (!btn) return;
+            ttMetric = btn.dataset.metric;
+            document.querySelectorAll('#tt-metric button').forEach(b => {
+                b.classList.toggle('active', b.dataset.metric === ttMetric);
+            });
+            fetchPerTorrent();
+        });
+
         async function fetchHistory(range) {
             try {
                 const res = await fetch('/api/metrics/history?range=' + encodeURIComponent(range),
@@ -932,9 +1054,12 @@
             poll();
             pollTunnel();
             pollStats();
+            fetchPerTorrent();
             pollTimer = setInterval(poll, POLL_MS);
             tunnelTimer = setInterval(pollTunnel, TUNNEL_POLL_MS);
             statsTimer = setInterval(pollStats, STATS_POLL_MS);
+            // Buckets are 15 min wide, so anything faster is wasted work.
+            ttTimer = setInterval(fetchPerTorrent, 60000);
         }
 
         document.addEventListener('visibilitychange', () => {
@@ -943,6 +1068,7 @@
                 if (tunnelTimer) { clearInterval(tunnelTimer); tunnelTimer = null; }
                 if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
                 if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+                if (ttTimer) { clearInterval(ttTimer); ttTimer = null; }
             } else if (!pollTimer) {
                 start();
                 // Resume history polling if a persisted range was selected.

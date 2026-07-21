@@ -141,18 +141,24 @@
       });
     }
 
+    // Area fills read well for two or three series but turn to mud once
+    // several overlap, so callers plotting many series pass fill:false and
+    // get bare lines.
+    const fill = opts.fill !== false;
     let paths = '';
     const defs = [];
     active.forEach((s, si) => {
       let d = '';
       s.points.forEach((p, i) => { d += (i ? 'L' : 'M') + sx(p.t).toFixed(1) + ' ' + sy(p.v).toFixed(1); });
-      const gid = 'ag' + si + Math.random().toString(36).slice(2, 6);
-      defs.push(`<linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1">` +
-        `<stop offset="0" stop-color="${s.color}" stop-opacity="0.22"/>` +
-        `<stop offset="1" stop-color="${s.color}" stop-opacity="0"/></linearGradient>`);
-      const lastX = sx(s.points[s.points.length - 1].t).toFixed(1);
-      const area = d + `L${lastX} ${sy(0).toFixed(1)}L${sx(s.points[0].t).toFixed(1)} ${sy(0).toFixed(1)}Z`;
-      paths += `<path d="${area}" fill="url(#${gid})"/>`;
+      if (fill) {
+        const gid = 'ag' + si + Math.random().toString(36).slice(2, 6);
+        defs.push(`<linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1">` +
+          `<stop offset="0" stop-color="${s.color}" stop-opacity="0.22"/>` +
+          `<stop offset="1" stop-color="${s.color}" stop-opacity="0"/></linearGradient>`);
+        const lastX = sx(s.points[s.points.length - 1].t).toFixed(1);
+        const area = d + `L${lastX} ${sy(0).toFixed(1)}L${sx(s.points[0].t).toFixed(1)} ${sy(0).toFixed(1)}Z`;
+        paths += `<path d="${area}" fill="url(#${gid})"/>`;
+      }
       paths += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" ` +
         `vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
     });

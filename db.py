@@ -94,6 +94,20 @@ CREATE TABLE IF NOT EXISTS metrics_samples (
     net_tx_rate INTEGER DEFAULT 0
 );
 
+-- Per-torrent upload/download deltas, accumulated into fixed time buckets.
+-- Rows store bytes moved *during* the bucket (not a cumulative counter), so
+-- range totals are a plain SUM and a torrent that seeds nothing writes no
+-- row at all. Keyed by hash because Transmission's numeric ids are only
+-- stable for the lifetime of the daemon process.
+CREATE TABLE IF NOT EXISTS torrent_traffic (
+    bucket_epoch INTEGER NOT NULL,
+    hash TEXT NOT NULL,
+    name TEXT,
+    up_bytes INTEGER NOT NULL DEFAULT 0,
+    down_bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_epoch, hash)
+) WITHOUT ROWID;
+
 CREATE INDEX IF NOT EXISTS idx_copy_history_finished ON copy_history(finished_at DESC);
 CREATE INDEX IF NOT EXISTS idx_unloaded_torrents_at ON unloaded_torrents(unloaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC);
@@ -110,6 +124,11 @@ _METRIC_COLS = (
     "cpu_percent", "mem_percent", "disk_percent", "net_rx_rate", "net_tx_rate",
 )
 _METRIC_COUNTER_COLS = frozenset({"uploaded_bytes", "downloaded_bytes"})
+
+# Width of one per-torrent traffic bucket. 15 minutes keeps 30 days of history
+# at ~2.9k rows per continuously-active torrent while still being fine enough
+# to see a seeding burst on the 6h view.
+TRAFFIC_BUCKET_SECS = 900
 
 
 def _now_iso():
@@ -531,6 +550,7 @@ def _maybe_prune_metrics():
         _metrics_last_prune = now
     try:
         prune_metrics()
+        prune_torrent_traffic()
     except sqlite3.Error:
         # Housekeeping — never let it break the sampler.
         pass
@@ -558,6 +578,111 @@ def get_metrics_range(since_epoch, buckets=240):
         (since_epoch, bucket_secs),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- per-torrent traffic ----------
+
+
+def add_torrent_traffic(bucket_epoch, rows):
+    """Accumulate per-torrent byte deltas into one bucket.
+
+    `rows` is an iterable of (hash, name, up_delta, down_delta). Deltas are
+    added to whatever the bucket already holds, so several sampler ticks
+    inside the same bucket sum together. Zero-delta rows are skipped by the
+    caller — an idle torrent should not create a row."""
+    rows = [r for r in rows if r[2] or r[3]]
+    if not rows:
+        return
+    bucket_epoch = int(bucket_epoch)
+    with _tx() as c:
+        c.executemany(
+            """INSERT INTO torrent_traffic
+                   (bucket_epoch, hash, name, up_bytes, down_bytes)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(bucket_epoch, hash) DO UPDATE SET
+                   up_bytes = up_bytes + excluded.up_bytes,
+                   down_bytes = down_bytes + excluded.down_bytes,
+                   name = COALESCE(excluded.name, name)""",
+            [(bucket_epoch, h, n, int(u), int(d)) for h, n, u, d in rows],
+        )
+
+
+def prune_torrent_traffic(days=None):
+    days = METRICS_RETENTION_DAYS if days is None else days
+    cutoff = int(time.time()) - int(days) * 86400
+    with _tx() as c:
+        c.execute("DELETE FROM torrent_traffic WHERE bucket_epoch < ?", (cutoff,))
+
+
+def get_torrent_traffic_totals(since_epoch, limit=8):
+    """Torrents ranked by bytes uploaded since `since_epoch`. `name` is the
+    most recent name seen for the hash, so entries survive the torrent being
+    removed from Transmission."""
+    c = _conn()
+    rows = c.execute(
+        """SELECT hash,
+                  (SELECT name FROM torrent_traffic t2
+                    WHERE t2.hash = t.hash AND t2.name IS NOT NULL
+                    ORDER BY t2.bucket_epoch DESC LIMIT 1) AS name,
+                  SUM(up_bytes) AS up_bytes,
+                  SUM(down_bytes) AS down_bytes
+             FROM torrent_traffic t
+            WHERE bucket_epoch >= ?
+            GROUP BY hash
+           HAVING up_bytes > 0 OR down_bytes > 0
+            ORDER BY up_bytes DESC
+            LIMIT ?""",
+        (int(since_epoch), int(limit)),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def traffic_series_grid(since_epoch, buckets=120):
+    """(start, step) of the plotting grid for a range, both snapped to whole
+    storage buckets so stored rows land on a point instead of straddling two.
+    Exposed so callers can label a chart with the step actually plotted —
+    which is wider than TRAFFIC_BUCKET_SECS on the long ranges."""
+    since_epoch = int(since_epoch)
+    buckets = max(1, int(buckets))
+    start = (since_epoch // TRAFFIC_BUCKET_SECS) * TRAFFIC_BUCKET_SECS
+    span = max(TRAFFIC_BUCKET_SECS, int(time.time()) - start)
+    step = max(TRAFFIC_BUCKET_SECS,
+               (span // buckets // TRAFFIC_BUCKET_SECS) * TRAFFIC_BUCKET_SECS)
+    return start, step
+
+
+def get_torrent_traffic_series(since_epoch, hashes, buckets=120, field="up_bytes"):
+    """Per-torrent byte totals over time, downsampled to at most `buckets`
+    points and zero-filled.
+
+    Zero-filling matters: a torrent with no row in a bucket uploaded nothing
+    then, and dropping the point would make the line jump straight across the
+    gap as if it had been seeding the whole time."""
+    if field not in ("up_bytes", "down_bytes"):
+        raise ValueError("field must be up_bytes or down_bytes")
+    hashes = list(hashes or [])
+    if not hashes:
+        return {}
+    start, step = traffic_series_grid(since_epoch, buckets)
+    placeholders = ", ".join("?" for _ in hashes)
+    c = _conn()
+    rows = c.execute(
+        f"""SELECT hash, (bucket_epoch - ?) / ? AS slot, SUM({field}) AS v
+              FROM torrent_traffic
+             WHERE bucket_epoch >= ? AND hash IN ({placeholders})
+             GROUP BY hash, slot""",
+        (start, step, start, *hashes),
+    ).fetchall()
+
+    slots = max(1, (int(time.time()) - start) // step + 1)
+    out = {h: [{"t": start + i * step, "v": 0} for i in range(slots)]
+           for h in hashes}
+    for r in rows:
+        series = out.get(r["hash"])
+        slot = r["slot"]
+        if series is not None and 0 <= slot < slots:
+            series[slot]["v"] = r["v"] or 0
+    return out
 
 
 def list_events(limit=200, since=None):

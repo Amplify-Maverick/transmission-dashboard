@@ -13,6 +13,15 @@
     --yellow: #d29922;
     --red: #f85149;
     --grey: #6e7681;
+    /* Categorical chart series. Fixed order, never cycled — a 6th series
+       folds into "Other". Stepped for the --panel surface these charts sit
+       on and validated as a set for colorblind separation (worst adjacent
+       pair ΔE 8.4 protan) and >=3:1 contrast; don't re-pick individually. */
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, sans-serif;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
 }
@@ -2430,6 +2439,15 @@ body.checking .torrent-list { padding-bottom: 96px; }
     color: var(--text-strong);
     border-color: var(--accent);
     background: rgba(88, 166, 255, 0.12);
+}
+
+/* Two control groups in one card header (direction + range). Wraps to
+   stacked rows on narrow screens rather than squeezing the title. */
+.chart-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
 }
 
 /* legend */

@@ -2542,6 +2542,66 @@ def api_metrics_history():
     })
 
 
+# Colors are assigned per rank on the client, so cap the series count at the
+# number of validated categorical slots the stylesheet defines.
+_TORRENT_SERIES_MAX = 5
+
+
+@app.route("/api/metrics/torrents")
+@login_required
+def api_metrics_torrents():
+    """Per-torrent transfer totals for a range, plus a time series for the
+    top few. `metric` picks which direction ranks and plots."""
+    rng = request.args.get("range", "24h")
+    span = _METRICS_RANGES.get(rng)
+    if span is None:
+        return jsonify({"ok": False, "error": "invalid range"}), 400
+    metric = request.args.get("metric", "up")
+    if metric not in ("up", "down"):
+        return jsonify({"ok": False, "error": "invalid metric"}), 400
+    field = "up_bytes" if metric == "up" else "down_bytes"
+    try:
+        limit = min(20, max(1, int(request.args.get("limit", 8))))
+    except (TypeError, ValueError):
+        limit = 8
+
+    since = int(time.time()) - span
+    try:
+        totals = db.get_torrent_traffic_totals(since, limit=limit)
+        if metric == "down":
+            totals.sort(key=lambda r: r.get("down_bytes") or 0, reverse=True)
+        top = totals[:_TORRENT_SERIES_MAX]
+        series_map = db.get_torrent_traffic_series(
+            since, [r["hash"] for r in top], buckets=120, field=field)
+        # The plotted step is wider than one storage bucket on long ranges;
+        # the chart labels itself with this, so report what's actually drawn.
+        _, step_secs = db.traffic_series_grid(since, 120)
+    except Exception as e:
+        return _err(e)
+
+    # Prefer the user's custom name, same as the torrent list does.
+    custom = db.get_custom_names_map()
+    for r in totals:
+        r["display_name"] = (
+            custom.get(r["hash"]) or r.get("name") or r["hash"][:12])
+    return jsonify({
+        "ok": True,
+        "range": rng,
+        "metric": metric,
+        "bucket_secs": db.TRAFFIC_BUCKET_SECS,
+        "step_secs": step_secs,
+        "totals": totals,
+        "series": [
+            {
+                "hash": r["hash"],
+                "name": r["display_name"],
+                "points": series_map.get(r["hash"], []),
+            }
+            for r in top
+        ],
+    })
+
+
 # ---------- tunnel status ----------
 #
 # Transmission's outbound traffic is meant to be bound to the WireGuard
@@ -3078,7 +3138,10 @@ def _sampler_net_rates():
 
 
 def _collect_metric_sample():
-    """Build one metrics_samples row from live Transmission + psutil state."""
+    """Build one metrics_samples row from live Transmission + psutil state.
+
+    Returns (sample, torrents) — the per-torrent payload is handed back so the
+    caller can derive traffic deltas from it without a second RPC round-trip."""
     sess = client.get_session_stats() or {}
     torrents = client.get_stats_torrents() or []
     cumulative = sess.get("cumulative-stats") or {}
@@ -3089,7 +3152,7 @@ def _collect_metric_sample():
         disk_pct = psutil.disk_usage(_disk_target()).percent
     except Exception:
         disk_pct = None
-    return {
+    sample = {
         "download_speed": int(sess.get("downloadSpeed") or 0),
         "upload_speed": int(sess.get("uploadSpeed") or 0),
         "uploaded_bytes": up,
@@ -3104,6 +3167,46 @@ def _collect_metric_sample():
         "net_rx_rate": rx_rate,
         "net_tx_rate": tx_rate,
     }
+    return sample, torrents
+
+
+# Last-seen cumulative uploadedEver/downloadedEver per torrent hash, used to
+# turn Transmission's monotonic counters into per-bucket deltas. In memory
+# only: after a restart the first tick just re-establishes the baseline, which
+# costs at most one sampler interval of attribution.
+_traffic_prev = {}
+
+
+def _record_torrent_traffic(torrents, now):
+    """Diff per-torrent byte counters against the previous tick and add the
+    deltas to the current time bucket."""
+    bucket = (int(now) // db.TRAFFIC_BUCKET_SECS) * db.TRAFFIC_BUCKET_SECS
+    seen = {}
+    rows = []
+    for t in torrents:
+        h = t.get("hashString")
+        if not h:
+            continue
+        up = int(t.get("uploadedEver") or 0)
+        down = int(t.get("downloadedEver") or 0)
+        seen[h] = (up, down)
+        prev = _traffic_prev.get(h)
+        if prev is None:
+            # First sighting this process — nothing to attribute yet.
+            continue
+        # A counter that went backwards means the torrent was re-added or
+        # re-verified and Transmission reset it. Skip the tick rather than
+        # recording a negative or treating the new low value as a huge delta.
+        d_up = up - prev[0]
+        d_down = down - prev[1]
+        if d_up < 0 or d_down < 0:
+            continue
+        if d_up or d_down:
+            rows.append((h, t.get("name"), d_up, d_down))
+    # Replace wholesale so hashes for removed torrents don't leak.
+    _traffic_prev.clear()
+    _traffic_prev.update(seen)
+    db.add_torrent_traffic(bucket, rows)
 
 
 def _metrics_sampler_worker():
@@ -3113,7 +3216,10 @@ def _metrics_sampler_worker():
     while True:
         time.sleep(interval)
         try:
-            db.insert_metric_sample(int(time.time()), **_collect_metric_sample())
+            now = int(time.time())
+            sample, torrents = _collect_metric_sample()
+            db.insert_metric_sample(now, **sample)
+            _record_torrent_traffic(torrents, now)
             db._maybe_prune_metrics()
         except Exception:
             # Never let the sampler die; the next tick retries from scratch.

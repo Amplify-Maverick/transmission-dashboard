@@ -204,7 +204,7 @@ class TransmissionClient:
         poll because secondsSeeding / uploadedEver / etc. aren't needed for
         the list view."""
         result = self.request("torrent-get", {"fields": [
-            "id", "name", "status", "totalSize", "uploadedEver",
+            "id", "hashString", "name", "status", "totalSize", "uploadedEver",
             "downloadedEver", "secondsSeeding", "secondsDownloading",
             "uploadRatio", "peersConnected", "addedDate",
         ]})
