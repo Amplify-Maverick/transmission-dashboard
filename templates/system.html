@@ -932,19 +932,37 @@
         let ttMetric = 'up';
         let ttData = null;
 
+        // Every way this card can be empty, each with its own message —
+        // "Collecting data…" for all of them made a disabled sampler look
+        // identical to a swarm that simply wasn't transferring.
+        function ttEmptyMessage() {
+            if (!ttData) return 'Loading…';
+            if (ttData.sampler_enabled === false) {
+                return 'Sampler disabled — set METRICS_SAMPLE_INTERVAL to enable';
+            }
+            if (!ttData.has_history) return 'Collecting data…';
+            const label = ttRange === '1h' ? 'the last hour' : `the last ${ttRange}`;
+            const verb = ttMetric === 'up' ? 'uploaded' : 'downloaded';
+            return `Nothing ${verb} in ${label}`;
+        }
+
         function renderPerTorrent() {
             if (!window.Charts) return;
             const totalsEl = $('chart-tt-totals');
             const seriesEl = $('chart-tt-series');
-            if (!ttData) {
-                totalsEl.innerHTML = '<div class="chart-empty">Collecting data…</div>';
-                seriesEl.innerHTML = '<div class="chart-empty">Collecting data…</div>';
+            const key = ttMetric === 'up' ? 'up_bytes' : 'down_bytes';
+            const totals = ttData
+                ? (ttData.totals || []).filter(r => (r[key] || 0) > 0) : [];
+            if (!totals.length) {
+                // Both boxes say the same thing — they used to disagree,
+                // one reading "No data" and the other "Collecting data…".
+                const msg = `<div class="chart-empty">${ttEmptyMessage()}</div>`;
+                totalsEl.innerHTML = msg;
+                seriesEl.innerHTML = msg;
                 $('tt-total-sub').textContent = '';
                 $('tt-series-sub').textContent = '';
                 return;
             }
-            const key = ttMetric === 'up' ? 'up_bytes' : 'down_bytes';
-            const totals = (ttData.totals || []).filter(r => (r[key] || 0) > 0);
             // The top N plotted below get their series color here too, so the
             // two charts read as one; the tail stays neutral grey.
             const colorFor = h => {
@@ -1054,6 +1072,7 @@
             poll();
             pollTunnel();
             pollStats();
+            renderPerTorrent();   // show a state immediately, not a blank box
             fetchPerTorrent();
             pollTimer = setInterval(poll, POLL_MS);
             tunnelTimer = setInterval(pollTunnel, TUNNEL_POLL_MS);

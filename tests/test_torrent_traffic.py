@@ -186,6 +186,96 @@ class TorrentTrafficTests(unittest.TestCase):
         data = self.client.get("/api/metrics/torrents?range=24h&metric=down").get_json()
         self.assertEqual(data["totals"][0]["hash"], "bb")
 
+    def test_down_ranking_sees_past_the_top_uploaders(self):
+        """Ranking must happen in SQL. Sorting an already-LIMITed list of top
+        uploaders hides a heavy downloader that seeds nothing."""
+        now = int(__import__("time").time())
+        rows = [(f"up{i}", f"Up{i}", 10_000 - i, 0) for i in range(8)]
+        rows.append(("leech", "Leecher", 1, 999_999))
+        db.add_torrent_traffic(now - 60, rows)
+        data = self.client.get(
+            "/api/metrics/torrents?range=24h&metric=down&limit=8").get_json()
+        self.assertEqual(data["totals"][0]["hash"], "leech")
+        self.assertEqual(data["series"][0]["hash"], "leech")
+
+    def test_totals_rejects_an_injected_field(self):
+        with self.assertRaises(ValueError):
+            db.get_torrent_traffic_totals(0, field="up_bytes; DROP TABLE")
+
+    def test_totals_exclude_zero_rows_for_the_ranked_field(self):
+        now = int(__import__("time").time())
+        db.add_torrent_traffic(now - 60, [("aa", "A", 0, 500)])
+        up = db.get_torrent_traffic_totals(now - 3600, field="up_bytes")
+        down = db.get_torrent_traffic_totals(now - 3600, field="down_bytes")
+        self.assertEqual(up, [])
+        self.assertEqual([r["hash"] for r in down], ["aa"])
+
+    # ---- empty states ----
+
+    def test_has_history_distinguishes_the_two_empties(self):
+        """A window with no traffic must not look like a sampler that has
+        never run — the UI shows a different message for each."""
+        now = int(__import__("time").time())
+        fresh = self.client.get("/api/metrics/torrents?range=24h").get_json()
+        self.assertFalse(fresh["has_history"])
+        self.assertEqual(fresh["totals"], [])
+
+        # Traffic exists, but older than the window being asked about.
+        db.add_torrent_traffic(now - 5 * 86400, [("aa", "A", 500, 0)])
+        quiet = self.client.get("/api/metrics/torrents?range=1h").get_json()
+        self.assertTrue(quiet["has_history"])
+        self.assertEqual(quiet["totals"], [])
+
+    def test_endpoint_reports_sampler_enabled(self):
+        data = self.client.get("/api/metrics/torrents?range=24h").get_json()
+        self.assertTrue(data["sampler_enabled"])
+        with patch.object(app.config, "METRICS_SAMPLE_INTERVAL", 0):
+            off = self.client.get("/api/metrics/torrents?range=24h").get_json()
+        self.assertFalse(off["sampler_enabled"])
+
+    # ---- sampler error reporting ----
+
+    def test_sampler_failure_is_logged_not_swallowed(self):
+        """A sampler failing every tick used to be invisible — empty charts
+        with no explanation anywhere."""
+        before = len(db.list_events(limit=50))
+        with patch.object(app, "_collect_metric_sample",
+                          side_effect=RuntimeError("rpc down")), \
+             patch.object(app.time, "sleep", side_effect=[None, StopIteration]):
+            with self.assertRaises(StopIteration):
+                app._metrics_sampler_worker()
+        events = db.list_events(limit=50)
+        self.assertEqual(len(events), before + 1)
+        self.assertEqual(events[0]["type"], "metrics.sampler")
+        self.assertEqual(events[0]["severity"], "error")
+        self.assertIn("rpc down", events[0]["details"]["error"])
+
+    def test_recovery_is_logged_so_the_error_isnt_left_hanging(self):
+        """One failing tick then a good one: the operator sees the fault
+        cleared rather than an error event with no resolution."""
+        with patch.object(app, "_collect_metric_sample",
+                          side_effect=[RuntimeError("rpc down"), ({}, [])]), \
+             patch.object(app, "_record_torrent_traffic"), \
+             patch.object(db, "insert_metric_sample"), \
+             patch.object(app.time, "sleep",
+                          side_effect=[None, None, StopIteration]):
+            with self.assertRaises(StopIteration):
+                app._metrics_sampler_worker()
+        types = [(e["type"], e["severity"]) for e in db.list_events(limit=10)]
+        self.assertIn(("metrics.sampler", "error"), types)
+        self.assertIn(("metrics.sampler", "info"), types)
+
+    def test_repeated_identical_failures_log_once(self):
+        """Same fault every 30s must not flood the events log."""
+        before = len(db.list_events(limit=50))
+        with patch.object(app, "_collect_metric_sample",
+                          side_effect=RuntimeError("rpc down")), \
+             patch.object(app.time, "sleep",
+                          side_effect=[None, None, None, StopIteration]):
+            with self.assertRaises(StopIteration):
+                app._metrics_sampler_worker()
+        self.assertEqual(len(db.list_events(limit=50)), before + 1)
+
     def test_endpoint_caps_plotted_series(self):
         now = int(__import__("time").time())
         db.add_torrent_traffic(now - 60, [

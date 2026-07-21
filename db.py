@@ -614,27 +614,40 @@ def prune_torrent_traffic(days=None):
         c.execute("DELETE FROM torrent_traffic WHERE bucket_epoch < ?", (cutoff,))
 
 
-def get_torrent_traffic_totals(since_epoch, limit=8):
-    """Torrents ranked by bytes uploaded since `since_epoch`. `name` is the
-    most recent name seen for the hash, so entries survive the torrent being
-    removed from Transmission."""
+def get_torrent_traffic_totals(since_epoch, limit=8, field="up_bytes"):
+    """Torrents ranked by `field` since `since_epoch`. `name` is the most
+    recent name seen for the hash, so entries survive the torrent being
+    removed from Transmission.
+
+    Ranking has to happen in SQL: sorting a list already truncated by LIMIT
+    would hide a heavy downloader that isn't also a top uploader."""
+    if field not in ("up_bytes", "down_bytes"):
+        raise ValueError("field must be up_bytes or down_bytes")
     c = _conn()
     rows = c.execute(
-        """SELECT hash,
-                  (SELECT name FROM torrent_traffic t2
-                    WHERE t2.hash = t.hash AND t2.name IS NOT NULL
-                    ORDER BY t2.bucket_epoch DESC LIMIT 1) AS name,
-                  SUM(up_bytes) AS up_bytes,
-                  SUM(down_bytes) AS down_bytes
-             FROM torrent_traffic t
-            WHERE bucket_epoch >= ?
-            GROUP BY hash
-           HAVING up_bytes > 0 OR down_bytes > 0
-            ORDER BY up_bytes DESC
-            LIMIT ?""",
+        f"""SELECT hash,
+                   (SELECT name FROM torrent_traffic t2
+                     WHERE t2.hash = t.hash AND t2.name IS NOT NULL
+                     ORDER BY t2.bucket_epoch DESC LIMIT 1) AS name,
+                   SUM(up_bytes) AS up_bytes,
+                   SUM(down_bytes) AS down_bytes
+              FROM torrent_traffic t
+             WHERE bucket_epoch >= ?
+             GROUP BY hash
+            HAVING {field} > 0
+             ORDER BY {field} DESC
+             LIMIT ?""",
         (int(since_epoch), int(limit)),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def has_torrent_traffic():
+    """Whether any per-torrent traffic has ever been recorded. Lets the UI
+    tell "nothing collected yet" apart from "nothing transferred in this
+    window" — the two look identical otherwise."""
+    c = _conn()
+    return c.execute("SELECT 1 FROM torrent_traffic LIMIT 1").fetchone() is not None
 
 
 def traffic_series_grid(since_epoch, buckets=120):

@@ -2567,15 +2567,15 @@ def api_metrics_torrents():
 
     since = int(time.time()) - span
     try:
-        totals = db.get_torrent_traffic_totals(since, limit=limit)
-        if metric == "down":
-            totals.sort(key=lambda r: r.get("down_bytes") or 0, reverse=True)
+        totals = db.get_torrent_traffic_totals(since, limit=limit, field=field)
         top = totals[:_TORRENT_SERIES_MAX]
         series_map = db.get_torrent_traffic_series(
             since, [r["hash"] for r in top], buckets=120, field=field)
         # The plotted step is wider than one storage bucket on long ranges;
         # the chart labels itself with this, so report what's actually drawn.
         _, step_secs = db.traffic_series_grid(since, 120)
+        # Lets the empty state say which kind of empty this is.
+        has_history = bool(totals) or db.has_torrent_traffic()
     except Exception as e:
         return _err(e)
 
@@ -2590,6 +2590,8 @@ def api_metrics_torrents():
         "metric": metric,
         "bucket_secs": db.TRAFFIC_BUCKET_SECS,
         "step_secs": step_secs,
+        "has_history": has_history,
+        "sampler_enabled": config.METRICS_SAMPLE_INTERVAL > 0,
         "totals": totals,
         "series": [
             {
@@ -3213,6 +3215,12 @@ def _metrics_sampler_worker():
     interval = max(5.0, config.METRICS_SAMPLE_INTERVAL)
     # Prime the net-rate baseline so the first stored sample isn't a zero.
     _sampler_net_rates()
+    # A sampler that fails every tick used to look exactly like a quiet
+    # swarm — empty charts, no explanation. Surface it as an event instead,
+    # but only when the failure signature changes or an hour has passed, so
+    # a persistent fault can't flood the events log.
+    last_error = None
+    last_error_at = 0.0
     while True:
         time.sleep(interval)
         try:
@@ -3221,9 +3229,26 @@ def _metrics_sampler_worker():
             db.insert_metric_sample(now, **sample)
             _record_torrent_traffic(torrents, now)
             db._maybe_prune_metrics()
-        except Exception:
+            if last_error is not None:
+                db.log_event("metrics.sampler", "info",
+                             "Metrics sampler recovered")
+                last_error = None
+        except Exception as e:
             # Never let the sampler die; the next tick retries from scratch.
-            pass
+            sig = f"{type(e).__name__}: {e}"
+            mono = time.monotonic()
+            if sig != last_error or mono - last_error_at > 3600:
+                last_error, last_error_at = sig, mono
+                try:
+                    db.log_event(
+                        "metrics.sampler", "error",
+                        "Metrics sampler tick failed; System page graphs "
+                        "will stop updating until it recovers",
+                        details={"error": sig},
+                    )
+                except Exception:
+                    # The DB itself is the likely fault — don't recurse.
+                    pass
 
 
 if config.METRICS_SAMPLE_INTERVAL > 0 and not _metrics_sampler_started:
