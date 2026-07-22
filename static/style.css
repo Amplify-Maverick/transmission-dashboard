@@ -2243,9 +2243,13 @@ body.checking .torrent-list { padding-bottom: 96px; }
     }
 
     /* chart-block's top margin is the stacked-layout spacer; the grid gap
-       replaces it. */
+       replaces it. The :first-child selectors are needed to outweigh
+       .chart-block:first-child, which is declared later in this file and
+       would otherwise indent the leading column by 4px. */
     .trend-grid > .chart-block,
-    .pt-grid > .chart-block { margin-top: 0; }
+    .trend-grid > .chart-block:first-child,
+    .pt-grid > .chart-block,
+    .pt-grid > .chart-block:first-child { margin-top: 0; }
 }
 
 .system-card-header {

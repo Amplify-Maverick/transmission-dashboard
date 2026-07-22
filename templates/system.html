@@ -866,12 +866,18 @@
                 ? `now ↓ ${fmtRate(last.down)} · ↑ ${fmtRate(last.up)}` : '';
         }
 
+        // Above 1200px the three trend charts sit side by side and have to
+        // match; stacked below that the hero chart stays the taller one.
+        function trendChartHeight() {
+            return window.matchMedia('(min-width: 1200px)').matches ? 200 : 160;
+        }
+
         function renderSwarmChart() {
             if (!window.Charts) return;
             Charts.areaLines($('chart-swarm'), [
                 { name: 'Active torrents', color: '--blue', points: histPts('active_count') },
                 { name: 'Swarm peers', color: '--yellow', points: histPts('swarm_peers') },
-            ], { height: 160, fmtY: v => String(Math.round(v)), fmtX: axisFmt(),
+            ], { height: trendChartHeight(), fmtY: v => String(Math.round(v)), fmtX: axisFmt(),
                  fmtTip: v => String(Math.round(v)) });
         }
 
@@ -884,7 +890,7 @@
                 { name: 'CPU', color: '--blue', points: cpu },
                 { name: 'Memory', color: '--green', points: mem },
                 { name: 'Disk', color: '--yellow', points: disk },
-            ], { height: 160, minYMax: 100, fmtY: v => `${Math.round(v)}%`,
+            ], { height: trendChartHeight(), minYMax: 100, fmtY: v => `${Math.round(v)}%`,
                  fmtX: axisFmt(), fmtTip: v => `${(v || 0).toFixed(1)}%` });
         }
 
