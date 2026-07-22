@@ -2137,7 +2137,7 @@ body.checking .torrent-list { padding-bottom: 96px; }
 
 .system-container {
     width: 100%;
-    max-width: 980px;
+    max-width: 1600px;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -2162,6 +2162,90 @@ body.checking .torrent-list { padding-bottom: 96px; }
 
 .system-card-wide {
     grid-column: 1 / -1;
+}
+
+/* These three only exist to group children for the desktop layout below —
+   everywhere else they must not affect the stacking they wrap. */
+.stats-body,
+.trend-grid,
+.pt-grid {
+    display: contents;
+}
+
+/* Desktop gets a real 12-column grid: the single 980px column left most of a
+   wide screen as empty gutter. Cards take explicit spans and the three tallest
+   ones split their own contents into columns instead of stacking. */
+@media (min-width: 1200px) {
+    .system-grid {
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+    }
+
+    #card-torrents,
+    #card-trends,
+    #card-distribution,
+    #card-per-torrent { grid-column: span 12; }
+
+    #card-cpu,
+    #card-memory,
+    #card-disk,
+    #card-network { grid-column: span 3; }
+
+    #card-tunnel { grid-column: span 5; }
+    #card-host { grid-column: span 3; }
+    #card-media-transfers { grid-column: span 4; }
+
+    /* Media transfers is last in the source but short, so it fills out the
+       tunnel/host row; the two tall chart cards move below it. */
+    #card-distribution { order: 1; }
+    #card-per-torrent { order: 2; }
+
+    /* Torrents: hall of fame and dashboard activity beside the top-seeded
+       list, which halves the card's height. */
+    .stats-body {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-rows: auto auto auto 1fr;
+        grid-template-areas:
+            "hof-title top-title"
+            "hof       top"
+            "act-title top"
+            "act       top";
+        column-gap: 28px;
+        row-gap: 6px;
+    }
+
+    .stats-body-hof-title { grid-area: hof-title; }
+    .stats-body-hof { grid-area: hof; }
+    .stats-body-top-title { grid-area: top-title; }
+    .stats-body-top { grid-area: top; align-self: start; }
+    .stats-body-act-title { grid-area: act-title; }
+    /* A single tile stretched across half the card reads as an empty box —
+       cap it so it stays tile-sized. */
+    .stats-body-act {
+        grid-area: act;
+        align-self: start;
+        grid-template-columns: repeat(auto-fill, minmax(160px, 240px));
+    }
+
+    .trend-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px 24px;
+        align-items: start;
+    }
+
+    /* Totals bar chart beside the time series rather than above it. */
+    .pt-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+        gap: 18px 24px;
+        align-items: start;
+    }
+
+    /* chart-block's top margin is the stacked-layout spacer; the grid gap
+       replaces it. */
+    .trend-grid > .chart-block,
+    .pt-grid > .chart-block { margin-top: 0; }
 }
 
 .system-card-header {

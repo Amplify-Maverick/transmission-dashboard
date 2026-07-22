@@ -75,28 +75,30 @@
                         </div>
                     </div>
 
-                    <h3 class="stats-section-title">Hall of fame</h3>
-                    <dl class="stats-superlatives">
-                        <dt>Biggest torrent</dt>
-                        <dd id="sup-biggest">—</dd>
-                        <dt>Longest seeder</dt>
-                        <dd id="sup-longest">—</dd>
-                        <dt>Best ratio</dt>
-                        <dd id="sup-best-ratio">—</dd>
-                        <dt>Oldest torrent</dt>
-                        <dd id="sup-oldest">—</dd>
-                    </dl>
+                    <div class="stats-body">
+                        <h3 class="stats-section-title stats-body-hof-title">Hall of fame</h3>
+                        <dl class="stats-superlatives stats-body-hof">
+                            <dt>Biggest torrent</dt>
+                            <dd id="sup-biggest">—</dd>
+                            <dt>Longest seeder</dt>
+                            <dd id="sup-longest">—</dd>
+                            <dt>Best ratio</dt>
+                            <dd id="sup-best-ratio">—</dd>
+                            <dt>Oldest torrent</dt>
+                            <dd id="sup-oldest">—</dd>
+                        </dl>
 
-                    <h3 class="stats-section-title">Top seeded</h3>
-                    <ol class="stats-top-list" id="top-uploaders">
-                        <li class="stats-top-empty">—</li>
-                    </ol>
+                        <h3 class="stats-section-title stats-body-top-title">Top seeded</h3>
+                        <ol class="stats-top-list stats-body-top" id="top-uploaders">
+                            <li class="stats-top-empty">—</li>
+                        </ol>
 
-                    <h3 class="stats-section-title">Dashboard activity</h3>
-                    <div class="metric-grid">
-                        <div class="metric-cell">
-                            <span class="metric-cell-label">Copied to media server</span>
-                            <span class="metric-cell-value" id="stat-copy-bytes">—</span>
+                        <h3 class="stats-section-title stats-body-act-title">Dashboard activity</h3>
+                        <div class="metric-grid stats-body-act">
+                            <div class="metric-cell">
+                                <span class="metric-cell-label">Copied to media server</span>
+                                <span class="metric-cell-value" id="stat-copy-bytes">—</span>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -112,17 +114,19 @@
                             <button type="button" data-range="30d">30d</button>
                         </div>
                     </header>
-                    <div class="chart-block">
-                        <h3 class="chart-title">Transfer speed <span class="chart-sub" id="throughput-sub"></span></h3>
-                        <div class="chart-box chart-box--tall" id="chart-throughput"></div>
-                    </div>
-                    <div class="chart-block">
-                        <h3 class="chart-title">Swarm &amp; activity</h3>
-                        <div class="chart-box" id="chart-swarm"></div>
-                    </div>
-                    <div class="chart-block">
-                        <h3 class="chart-title">System load</h3>
-                        <div class="chart-box" id="chart-load"></div>
+                    <div class="trend-grid">
+                        <div class="chart-block">
+                            <h3 class="chart-title">Transfer speed <span class="chart-sub" id="throughput-sub"></span></h3>
+                            <div class="chart-box chart-box--tall" id="chart-throughput"></div>
+                        </div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">Swarm &amp; activity</h3>
+                            <div class="chart-box" id="chart-swarm"></div>
+                        </div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">System load</h3>
+                            <div class="chart-box" id="chart-load"></div>
+                        </div>
                     </div>
                 </section>
 
@@ -330,20 +334,22 @@
                             </div>
                         </div>
                     </header>
-                    <div class="chart-block">
-                        <h3 class="chart-title">Top torrents <span class="chart-sub" id="tt-total-sub"></span></h3>
-                        <div class="chart-box" id="chart-tt-totals"></div>
-                    </div>
-                    <div class="chart-block">
-                        <h3 class="chart-title">Over time <span class="chart-sub" id="tt-series-sub"></span></h3>
-                        <div class="chart-controls" style="margin-bottom:8px">
-                            <div class="chart-range" id="tt-view" role="tablist" aria-label="Chart view">
-                                <button type="button" data-view="top" class="active">Top 5 combined</button>
-                                <button type="button" data-view="seeding">Seeding torrents</button>
-                            </div>
+                    <div class="pt-grid">
+                        <div class="chart-block">
+                            <h3 class="chart-title">Top torrents <span class="chart-sub" id="tt-total-sub"></span></h3>
+                            <div class="chart-box" id="chart-tt-totals"></div>
                         </div>
-                        <div class="chart-box chart-box--tall" id="chart-tt-series"></div>
-                        <div id="tt-seeding-list" hidden></div>
+                        <div class="chart-block">
+                            <h3 class="chart-title">Over time <span class="chart-sub" id="tt-series-sub"></span></h3>
+                            <div class="chart-controls" style="margin-bottom:8px">
+                                <div class="chart-range" id="tt-view" role="tablist" aria-label="Chart view">
+                                    <button type="button" data-view="top" class="active">Top 5 combined</button>
+                                    <button type="button" data-view="seeding">Seeding torrents</button>
+                                </div>
+                            </div>
+                            <div class="chart-box chart-box--tall" id="chart-tt-series"></div>
+                            <div id="tt-seeding-list" hidden></div>
+                        </div>
                     </div>
                 </section>
 
