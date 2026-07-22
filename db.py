@@ -679,6 +679,35 @@ def get_torrent_traffic_totals(since_epoch, limit=8, field="up_bytes"):
     return [dict(r) for r in rows]
 
 
+def get_torrent_traffic_sums(since_epoch, hashes, field="up_bytes"):
+    """{hash: bytes} moved since `since_epoch`, for a caller-supplied set of
+    hashes. Unlike get_torrent_traffic_totals this doesn't rank or truncate —
+    it answers "how much did *these* torrents move", which is what annotating
+    an already-ranked list needs. Hashes with no rows are returned as 0 so the
+    caller can tell "nothing in this window" from "not in the result"."""
+    if field not in ("up_bytes", "down_bytes"):
+        raise ValueError("field must be up_bytes or down_bytes")
+    hashes = list(hashes or [])
+    if not hashes:
+        return {}
+    out = {h: 0 for h in hashes}
+    c = _conn()
+    # Chunked to stay under SQLITE_MAX_VARIABLE_NUMBER (999 on older builds).
+    for i in range(0, len(hashes), 400):
+        chunk = hashes[i:i + 400]
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = c.execute(
+            f"""SELECT hash, SUM({field}) AS v
+                  FROM torrent_traffic
+                 WHERE bucket_epoch >= ? AND hash IN ({placeholders})
+                 GROUP BY hash""",
+            (int(since_epoch), *chunk),
+        ).fetchall()
+        for r in rows:
+            out[r["hash"]] = r["v"] or 0
+    return out
+
+
 def has_torrent_traffic():
     """Whether any per-torrent traffic has ever been recorded. Lets the UI
     tell "nothing collected yet" apart from "nothing transferred in this

@@ -2363,6 +2363,33 @@ _SIZE_BUCKETS = (
 )
 
 
+def _annotate_recent_upload(entries, hours=24):
+    """Add `recent` (bytes uploaded in the last `hours`) to ranked entries,
+    in place.
+
+    Best-effort: the traffic sampler is optional and only starts accumulating
+    once enabled, so a missing table or an empty window leaves `recent` as
+    None. That's deliberately distinct from 0 — "not being measured" and
+    "measured, uploaded nothing" should not render the same.
+    """
+    if not entries:
+        return
+    hashes = [e["hash"] for e in entries if e.get("hash")]
+    if not hashes:
+        return
+    try:
+        if not db.has_torrent_traffic():
+            return
+        since = int(time.time()) - hours * 3600
+        sums = db.get_torrent_traffic_sums(since, hashes, field="up_bytes")
+    except Exception:
+        return
+    for e in entries:
+        h = e.get("hash")
+        if h:
+            e["recent"] = sums.get(h, 0)
+
+
 def _torrent_distribution(torrents):
     """Snapshot distributions of the current torrent set for the System page
     charts: ratio histogram, size histogram, and library bytes by label."""
@@ -2459,12 +2486,17 @@ def api_stats():
             reverse=True,
         )
         return [
-            {"id": t.get("id"), "name": t.get("name"), "value": t.get(key)}
+            {"id": t.get("id"), "name": t.get("name"), "value": t.get(key),
+             "hash": t.get("hashString")}
             for t in ranked[:n]
         ]
 
     biggest = superlative(torrents, "totalSize")
     top_uploaders = top_n(torrents, "uploadedEver", n=10)
+    # Annotate each with what it actually did in the last 24h. uploadedEver is
+    # a lifetime counter, so the ranking alone can't tell a torrent that's
+    # still working from one that banked its total months ago.
+    _annotate_recent_upload(top_uploaders)
     top_uploader = top_uploaders[0] if top_uploaders else None
     longest_seeder = superlative(torrents, "secondsSeeding")
     # Ratio superlative only makes sense once a torrent has actually uploaded

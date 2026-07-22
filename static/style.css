@@ -2439,6 +2439,32 @@ body.checking .torrent-list { padding-bottom: 96px; }
     white-space: nowrap;
 }
 
+/* 24h column only exists when the traffic sampler is actually collecting —
+   without it the list keeps its original three-column shape. */
+.stats-top-list[data-measured="1"] {
+    grid-template-columns: max-content 1fr max-content max-content;
+}
+
+.stats-top-list .stats-top-recent {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--green);
+    white-space: nowrap;
+    text-align: right;
+}
+
+.stats-top-list .stats-top-recent.is-idle { color: var(--muted); }
+
+.stats-top-head span {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    text-align: right;
+    white-space: nowrap;
+}
+
 .stats-top-empty {
     grid-column: 1 / -1;
     font-family: var(--mono);

@@ -692,12 +692,30 @@
                 el.innerHTML = '<li class="stats-top-empty">—</li>';
                 return;
             }
-            el.innerHTML = list.map((t, i) => {
+            // `recent` is null when the traffic sampler isn't collecting, which
+            // is not the same as a torrent that uploaded nothing — show a dash
+            // for the first and a real 0 for the second.
+            const measured = list.some(t => t.recent != null);
+            el.dataset.measured = measured ? '1' : '';
+            // Header row is decoration for sighted readers — each cell also
+            // carries its own title, so hiding it from AT loses nothing.
+            const head = measured
+                ? '<li class="stats-top-head" aria-hidden="true">'
+                    + '<span></span><span></span>'
+                    + '<span>total</span><span>24h</span></li>'
+                : '';
+            el.innerHTML = head + list.map((t, i) => {
                 const name = escapeHtml(t.name || `torrent ${t.id ?? ''}`);
+                const recent = t.recent == null
+                    ? '<span class="stats-top-recent is-idle">—</span>'
+                    : t.recent > 0
+                        ? `<span class="stats-top-recent" title="Uploaded in the last 24h">+${fmtBytes(t.recent)}</span>`
+                        : '<span class="stats-top-recent is-idle" title="Nothing uploaded in the last 24h">idle</span>';
                 return `<li>`
                     + `<span class="stats-top-rank">${i + 1}</span>`
                     + `<span class="stats-top-name" title="${name}">${name}</span>`
-                    + `<span class="stats-top-value">${fmtBytes(t.value)}</span>`
+                    + `<span class="stats-top-value" title="Uploaded all time">${fmtBytes(t.value)}</span>`
+                    + (measured ? recent : '')
                     + `</li>`;
             }).join('');
         }
