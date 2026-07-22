@@ -93,6 +93,23 @@ def _torrent_name(tid):
     return f"torrent {tid}"
 
 
+def _torrent_hash(tid):
+    """The torrent's infohash, or None if it can't be read.
+
+    Transmission's numeric id is session-scoped — it is reassigned when the
+    daemon restarts and reused after a removal — so it is not a stable
+    identity. The infohash is; copy-state entries carry it so a stale entry
+    can't be inherited by whatever torrent later lands on the same id.
+    """
+    try:
+        detail = client.get_torrent_detail(tid)
+        if detail:
+            return detail.get("hashString") or None
+    except Exception:
+        pass
+    return None
+
+
 def _copy_severity(status):
     if status == "done":
         return "info"
@@ -1010,6 +1027,12 @@ def _run_copy(tid, sources, dest_root, subfolder, rename,
 
     def cancelled():
         return cancel_event.is_set()
+
+    # Bind the state entry to this torrent's identity before anything else
+    # writes to it. Every later update_copy_entry(tid, ...) merges into this
+    # entry, so all outcomes — done, error, cancelled — inherit the hash and
+    # survive the id-reassignment sweep in _gc_state_for_live_torrents.
+    update_copy_entry(tid, hash=_torrent_hash(tid))
 
     # Optional rsync bandwidth cap (KB/s) from media config. Unlimited
     # copies compete with Transmission for CPU (ssh encryption) and disk.
@@ -3568,34 +3591,109 @@ def api_settings_relocate_all():
         return _err(e)
 
 
-_state_gc_last_run = 0.0
-_STATE_GC_INTERVAL = 60.0
+_legacy_copied_names = None
 
 
-def _gc_state_for_live_ids(live_ids):
-    """Drop copy-state entries for torrent ids that no longer exist in
-    Transmission. The state file grew unboundedly otherwise — every torrent
-    you ever copied left a row behind even after removal.
+def _entry_belongs_to(entry, live_id, live_hash, live_name):
+    """Does this copy-state entry actually describe the torrent now holding
+    its id? Returns True (keep), False (stale — drop).
+
+    Transmission ids are session-scoped: they are reassigned on daemon
+    restart and reused after removals, so an entry keyed only by id can be
+    inherited by an unrelated torrent — which then reads as already copied
+    (the UI treats status == 'done' as sent even without the 'Copied'
+    label). Entries written since the fix carry the infohash and are matched
+    exactly. Older entries have no hash, so they are validated against
+    copy_history: an id that finished a copy under exactly this torrent's
+    name is that torrent. A legacy entry that can't be corroborated is
+    dropped — genuine copies keep their 'Copied' label in Transmission, so
+    the card still shows as sent.
+    """
+    global _legacy_copied_names
+    if not live_hash:
+        # Transmission didn't say what this id currently is, so there is no
+        # basis to judge — never drop on missing evidence.
+        return True
+    recorded = entry.get("hash")
+    if recorded:
+        return recorded == live_hash
+    if entry.get("status") != "done":
+        # A hash-less entry that doesn't claim 'done' can't produce a false
+        # "sent" chip or a delete-after-copy, so leave it be — it picks up a
+        # hash on the next copy. Only the 'done' claim is worth challenging.
+        return True
+    if _legacy_copied_names is None:
+        try:
+            _legacy_copied_names = db.get_copied_names_by_id()
+        except Exception:
+            # No history to check against — keep the entry rather than risk
+            # un-marking a real copy.
+            return True
+    return live_name in _legacy_copied_names.get(live_id, ())
+
+
+def _gc_state_for_live_torrents(torrents):
+    """Reconcile copy state against the torrents Transmission actually has.
+
+    Drops entries whose id no longer exists (the state file grew unboundedly
+    otherwise — every torrent you ever copied left a row behind after
+    removal) and entries whose id has since been reassigned to a different
+    torrent (see _entry_belongs_to).
 
     Skips entries belonging to active workers so an in-flight copy can
     still write its terminal state.
     """
-    global _state_gc_last_run
-    now = time.monotonic()
-    if now - _state_gc_last_run < _STATE_GC_INTERVAL:
-        return
-    _state_gc_last_run = now
-    live = {str(i) for i in live_ids}
+    live = {}
+    for t in torrents:
+        tid = t.get("id")
+        if tid is not None:
+            live[str(tid)] = t
 
     with _copy_state_lock:
         cache = _ensure_copy_state_cache_unlocked()
         with _active_copies_lock:
             active = {str(t) for t in _active_copies}
-        stale = [k for k in cache if k not in live and k not in active]
-        if stale:
-            for k in stale:
-                cache.pop(k, None)
+        stale = []
+        adopted = 0
+        for k, entry in cache.items():
+            if k in active:
+                continue
+            t = live.get(k)
+            if t is None:
+                stale.append((k, "torrent no longer exists"))
+                continue
+            live_hash = t.get("hashString") or None
+            if not _entry_belongs_to(entry, t.get("id"), live_hash,
+                                     t.get("name")):
+                stale.append((k, f"id reassigned to {t.get('name')!r}"))
+            elif (entry.get("status") == "done" and not entry.get("hash")
+                  and live_hash):
+                # Legacy entry corroborated by copy_history — stamp the hash
+                # so it never has to be re-validated.
+                entry["hash"] = live_hash
+                adopted += 1
+        dropped = []
+        for k, reason in stale:
+            entry = cache.pop(k, None) or {}
+            # Only worth an event when we're discarding a copy the UI would
+            # have shown as sent; idle/error rows are noise.
+            if entry.get("status") == "done":
+                dropped.append((k, reason, entry.get("dest_path")))
+        if stale or adopted:
             _flush_copy_state_unlocked(force=True)
+
+    # Logged outside the lock — an event write can block on the sqlite busy
+    # timeout, and every copy-state reader would be stuck behind it.
+    for k, reason, dest_path in dropped:
+        try:
+            db.log_event(
+                "copy.state.stale", "info",
+                f"Dropped stale copy state for id {k}: {reason}",
+                torrent_id=int(k) if k.isdigit() else None,
+                details={"dest_path": dest_path},
+            )
+        except Exception:
+            pass
 
 
 @app.route("/api/torrents")
@@ -3609,7 +3707,7 @@ def api_torrents():
             if h and names_map.get(h):
                 t["custom_name"] = names_map[h]
                 t["default_name"] = t.get("name")
-        _gc_state_for_live_ids(t.get("id") for t in torrents)
+        _gc_state_for_live_torrents(torrents)
         return jsonify(torrents)
     except Exception as e:
         return _err(e)
@@ -4449,7 +4547,21 @@ def api_copy_check(tid):
     roots = [p for p in ((f.get("path") or "").strip()
                          for f in (cfg.get("folders") or [])) if p]
 
+    try:
+        detail = client.get_torrent_detail(tid)
+    except Exception:
+        detail = None
+
     entry = load_copy_state().get(str(tid)) or {}
+    # Don't probe paths recorded for a different torrent. Ids are reassigned
+    # on daemon restart, so an entry whose hash doesn't match the torrent now
+    # holding the id describes something else entirely — its dest_path would
+    # send the search after the wrong media. _gc_state_for_live_torrents
+    # clears these on the next /api/torrents poll; ignore it until then.
+    recorded_hash = entry.get("hash")
+    live_hash = (detail or {}).get("hashString") or None
+    if recorded_hash and live_hash and recorded_hash != live_hash:
+        entry = {}
     dest_path = entry.get("dest_path")
     # Real per-item paths, recorded at copy time for new copies. Old copies
     # (pre-this-feature, or copied to the previous server) won't have them, so
@@ -4462,10 +4574,6 @@ def api_copy_check(tid):
     #  - that leaf with a trailing " [Seasons 1, 2]" label stripped (the show
     #    folder for a multi-season copy, whose dest_path is only a label).
     names = set()
-    try:
-        detail = client.get_torrent_detail(tid)
-    except Exception:
-        detail = None
     if detail and detail.get("name"):
         names.add(detail["name"])
     if dest_path:
@@ -4481,6 +4589,16 @@ def api_copy_check(tid):
             "ok": True, "id": tid, "state": "unknown",
             "reason": "nothing on record to check", "dest_path": dest_path,
             "host": host,
+        })
+    if not exact_paths and detail and (detail.get("percentDone") or 0) < 1:
+        # Nothing exact on record and the download isn't finished, so the only
+        # thing left is the fuzzy name search — which would happily match a
+        # folder left by an earlier copy of the same show and report a torrent
+        # that has never been sent as "present". Refuse to guess.
+        return jsonify({
+            "ok": True, "id": tid, "state": "unknown",
+            "reason": "torrent is still downloading — nothing has been copied yet",
+            "dest_path": dest_path, "host": host,
         })
     if not exact_paths and not roots:
         return jsonify({
@@ -4539,6 +4657,7 @@ def api_copy_set_copied(tid):
         existing = list(detail.get("labels") or []) if detail else []
     except Exception as e:
         return _err(e)
+    live_hash = (detail or {}).get("hashString") or None
 
     if copied:
         if COPIED_LABEL not in existing:
@@ -4546,8 +4665,8 @@ def api_copy_set_copied(tid):
                 client.set_labels(tid, existing + [COPIED_LABEL])
             except Exception as e:
                 return _err(e)
-        update_copy_entry(tid, status="done", finished_at=_now_iso(),
-                          error_message=None)
+        update_copy_entry(tid, status="done", hash=live_hash,
+                          finished_at=_now_iso(), error_message=None)
     else:
         if COPIED_LABEL in existing:
             try:
@@ -4557,7 +4676,7 @@ def api_copy_set_copied(tid):
                 return _err(e)
         # Reset to idle (keeping dest_path for reference) so the card falls
         # back to "ready to copy" instead of reading as done.
-        update_copy_entry(tid, status="idle", progress_pct=0,
+        update_copy_entry(tid, status="idle", hash=live_hash, progress_pct=0,
                           error_message=None)
     return jsonify({"ok": True, "id": tid, "copied": copied})
 

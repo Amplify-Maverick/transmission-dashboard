@@ -278,6 +278,26 @@ def list_copies(limit=50):
     return [dict(r) for r in rows]
 
 
+def get_copied_names_by_id():
+    """Map torrent_id -> set of names that id successfully copied under.
+
+    Used to validate legacy copy-state entries (written before the hash was
+    recorded) against a live torrent holding the same numeric id. Transmission
+    ids are session-scoped and get reassigned, so an id alone proves nothing —
+    but an id that copied a torrent of exactly this name almost certainly is
+    that torrent. Only 'done' rows count.
+    """
+    c = _conn()
+    rows = c.execute(
+        "SELECT torrent_id, torrent_name FROM copy_history "
+        "WHERE status = 'done' AND torrent_name IS NOT NULL"
+    ).fetchall()
+    out = {}
+    for r in rows:
+        out.setdefault(r["torrent_id"], set()).add(r["torrent_name"])
+    return out
+
+
 def get_custom_name(hash):
     if not hash:
         return None

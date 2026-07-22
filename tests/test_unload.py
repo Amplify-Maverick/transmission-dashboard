@@ -47,6 +47,11 @@ class UnloadTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         db.DB_PATH = cls._orig_db_path
+        # Close before dropping the TLS holder, or the temp DB's connection
+        # is only reclaimed at GC time (noisy ResourceWarning).
+        conn = getattr(db._tls, "conn", None)
+        if conn is not None:
+            conn.close()
         db._tls = threading.local()
         os.unlink(cls._tmp.name)
 
