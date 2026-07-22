@@ -200,7 +200,10 @@ _FAKE_TORRENTS = [
         "name": "archlinux-2026.06.01-x86_64.iso",
         "hashString": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "status": 2,
-        "percentDone": 0.88,
+        # Mid-recheck with a bad patch: 62% of the disk read, but only 41%
+        # of what's been read hashed clean.
+        "percentDone": 0.41,
+        "recheckProgress": 0.62,
         "rateDownload": 0,
         "rateUpload": 0,
         "uploadRatio": 1.05,

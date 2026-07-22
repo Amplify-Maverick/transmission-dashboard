@@ -554,8 +554,20 @@
                             <span class="status-pill status-pill--top" data-field="status"></span>
                             <span class="card-labels" data-field="labels"></span>
                         </div>
-                        <div class="progress">
-                            <div class="progress-fill"></div>
+                        <div class="progress" data-field="progress-bar">
+                            <div class="progress-fill" data-field="progress-fill"></div>
+                        </div>
+                        <div class="card-verify" data-field="verify" hidden>
+                            <div class="verify-row">
+                                <span class="verify-label">Checked</span>
+                                <div class="progress"><div class="progress-fill" data-field="verify-checked-fill"></div></div>
+                                <span class="verify-pct" data-field="verify-checked-pct"></span>
+                            </div>
+                            <div class="verify-row">
+                                <span class="verify-label">Valid</span>
+                                <div class="progress"><div class="progress-fill" data-field="verify-valid-fill"></div></div>
+                                <span class="verify-pct" data-field="verify-valid-pct"></span>
+                            </div>
                         </div>
                         <div class="card-check-status" data-field="check-status" hidden>
                             <span class="card-check-status-dot" aria-hidden="true"></span>
@@ -864,7 +876,11 @@
                 tiles.push(tile('Last activity', d.activityDate ? formatDateMaybe(d.activityDate) : '—'));
                 tiles.push(tile('Completed', formatDateMaybe(d.doneDate)));
             } else if (isCheck) {
-                tiles.push(tile('Verifying', `${Math.round((d.percentDone || 0) * 100)}%`));
+                tiles.push(tile('Checked',
+                    d.status === 2
+                        ? `${Math.round((d.recheckProgress || 0) * 100)}%`
+                        : '—'));
+                tiles.push(tile('Valid', `${Math.round((d.percentDone || 0) * 100)}%`));
                 tiles.push(tile('Have', formatBytes(have)));
                 tiles.push(tile('Unchecked', formatBytes(d.haveUnchecked || 0)));
                 tiles.push(tile('Size', formatBytes(sizeWhenDone)));
@@ -1082,9 +1098,11 @@
             const sendBtn = card.querySelector('[data-field="send-btn"]');
             if (sendBtn) sendBtn.hidden = !isReady;
 
-            const fill = card.querySelector('.progress-fill');
+            const fill = card.querySelector('[data-field="progress-fill"]');
             const widthStr = (pct * 100).toFixed(1) + '%';
             if (fill.style.width !== widthStr) fill.style.width = widthStr;
+
+            renderVerify(card, t, pct);
 
             const displayName = t.custom_name || t.name;
             const name = card.querySelector('.card-name');
@@ -1127,6 +1145,42 @@
             const bps = bitratesById.get(t.id);
             if (bps) setField(card, 'bitrate', formatBitrate(bps));
             setMeta(card, 'bitrate', !isComplete && !!bps);
+        }
+
+        // A recheck has two independent progressions and the single bar can
+        // only tell you one of them:
+        //   Checked → recheckProgress, how much of the file has been re-read
+        //   Valid   → percentDone, how much of what was read hashed clean
+        // On intact data the two track each other exactly; they diverge only
+        // when pieces fail, which is the case the user ran a verify to find.
+        // Swap the normal bar for both of them while checking.
+        function renderVerify(card, t, pct) {
+            const box = card.querySelector('[data-field="verify"]');
+            const bar = card.querySelector('[data-field="progress-bar"]');
+            // Status 1 (check pending) has no recheckProgress yet — show the
+            // pair anyway, both at zero, so the card doesn't reflow the
+            // instant checking actually starts.
+            const isCheck = t.status === 1 || t.status === 2;
+            box.hidden = !isCheck;
+            bar.hidden = isCheck;
+            if (!isCheck) return;
+
+            // recheckProgress is stale/absent outside status 2 — Transmission
+            // leaves the last run's value in place, so don't trust it for
+            // check-pending.
+            const checked = t.status === 2
+                ? Math.max(0, Math.min(1, t.recheckProgress || 0))
+                : 0;
+            setBarWidth(card, 'verify-checked-fill', checked);
+            setBarWidth(card, 'verify-valid-fill', pct);
+            setField(card, 'verify-checked-pct', `${Math.round(checked * 100)}%`);
+            setField(card, 'verify-valid-pct', `${Math.round(pct * 100)}%`);
+        }
+
+        function setBarWidth(card, name, frac) {
+            const el = card.querySelector(`[data-field="${name}"]`);
+            const w = (frac * 100).toFixed(1) + '%';
+            if (el.style.width !== w) el.style.width = w;
         }
 
         function setMeta(card, name, show) {

@@ -558,8 +558,9 @@ body {
 }
 
 /* Progress bar is always 100% on completed torrents — hide it to
-   compact the card and reinforce the "done" feel. */
-.card[data-complete="true"] .progress { display: none; }
+   compact the card and reinforce the "done" feel. Scoped to the main bar
+   so the verify pair still shows when a completed torrent is rechecked. */
+.card[data-complete="true"] [data-field="progress-bar"] { display: none; }
 
 .card[hidden] { display: none; }
 
@@ -653,10 +654,46 @@ body {
     transition: width 0.4s ease, background-color 0.2s;
 }
 
-.card[data-status="downloading"] .progress-fill { background: var(--blue); }
-.card[data-status="seeding"]     .progress-fill { background: var(--green); }
-.card[data-status="paused"]      .progress-fill { background: var(--grey); }
-.card[data-status="checking"]    .progress-fill { background: var(--yellow); }
+/* Scoped to the main bar — the verify pair below sets its own colours. */
+.card[data-status="downloading"] [data-field="progress-fill"] { background: var(--blue); }
+.card[data-status="seeding"]     [data-field="progress-fill"] { background: var(--green); }
+.card[data-status="paused"]      [data-field="progress-fill"] { background: var(--grey); }
+.card[data-status="checking"]    [data-field="progress-fill"] { background: var(--yellow); }
+
+/* Verify: two labelled bars in place of the single one. "Checked" always
+   walks to 100%; "Valid" only climbs on pieces that pass, so a short green
+   bar next to a full yellow one is the "this data is damaged" signal. */
+.card-verify {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+/* display:flex above beats the UA's [hidden] rule — hide explicitly. */
+.card-verify[hidden] { display: none; }
+
+.verify-row {
+    display: grid;
+    grid-template-columns: 3.5rem 1fr 2.5rem;
+    align-items: center;
+    gap: 8px;
+}
+
+.verify-label {
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.2px;
+}
+
+.verify-pct {
+    color: var(--muted);
+    font-size: 11px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.card-verify [data-field="verify-checked-fill"] { background: var(--yellow); }
+.card-verify [data-field="verify-valid-fill"]   { background: var(--green); }
 
 /* ---------- card error banner ---------- */
 

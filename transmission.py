@@ -30,6 +30,11 @@ TORRENT_FIELDS = [
     "hashString",
     "status",
     "percentDone",
+    # Only meaningful while status == 2 (checking): the fraction of the
+    # torrent re-read from disk so far. Distinct from percentDone, which
+    # during a recheck counts pieces that *passed*. Lives in the list
+    # query (not just DETAIL_FIELDS) so the collapsed card can draw it.
+    "recheckProgress",
     "rateDownload",
     "rateUpload",
     "uploadRatio",
