@@ -19,6 +19,7 @@
         </nav>
         <div class="topbar-actions">
             <button type="button" id="add-btn" class="btn btn-primary btn-sm">+ Add Torrent</button>
+            <a href="{{ url_for('api_torrents_export_csv') }}" id="export-csv-btn" class="btn btn-sm" download title="Export all torrents and their magnet links to a CSV file">Export CSV</a>
             <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
                 <span class="tunnel-dot" data-state="unknown"></span>
                 <span class="tunnel-label">Tunnel ?</span>

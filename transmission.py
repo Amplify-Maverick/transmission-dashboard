@@ -215,6 +215,15 @@ class TransmissionClient:
         ]})
         return result.get("arguments", {}).get("torrents", [])
 
+    def get_torrents_export(self):
+        """Minimal per-torrent payload for the CSV export: identity, state,
+        completeness, and magnet link. Kept off the main poll — magnetLink
+        isn't in TORRENT_FIELDS because the list view never needs it."""
+        result = self.request("torrent-get", {"fields": [
+            "id", "name", "hashString", "status", "percentDone", "magnetLink",
+        ]})
+        return result.get("arguments", {}).get("torrents", [])
+
     def get_session_stats(self):
         """`session-stats` gives cumulative + current totals straight from the
         daemon — avoids re-summing per-torrent payloads for headline numbers."""

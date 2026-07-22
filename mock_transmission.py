@@ -334,6 +334,9 @@ class MockTransmissionClient:
     def get_stats_torrents(self):
         return list(_FAKE_TORRENTS)
 
+    def get_torrents_export(self):
+        return list(_FAKE_TORRENTS)
+
     def get_torrent_files(self, ids):
         out = []
         for t in _FAKE_TORRENTS:

@@ -1,5 +1,7 @@
 import base64
+import csv
 import hmac
+import io
 import json
 import os
 import queue
@@ -18,6 +20,7 @@ import psutil
 import requests
 from flask import (
     Flask,
+    Response,
     jsonify,
     redirect,
     render_template,
@@ -3905,6 +3908,61 @@ def api_torrents():
         return jsonify(torrents)
     except Exception as e:
         return _err(e)
+
+
+# Transmission status codes for the export's readable status column.
+_EXPORT_STATUS_LABELS = {
+    0: "Stopped", 1: "Check pending", 2: "Checking",
+    3: "Download pending", 4: "Downloading",
+    5: "Seed pending", 6: "Seeding",
+}
+
+
+@app.route("/api/torrents/export.csv")
+@login_required
+def api_torrents_export_csv():
+    """Every torrent's magnet link as a downloadable CSV, split by whether
+    the data is complete. Purpose-built for rebuilding the daemon elsewhere:
+    the two magnet columns let you paste all the incomplete ones (to fetch)
+    separately from the finished ones (already-seeding). Completeness is by
+    percentDone, so a *paused-but-finished* torrent correctly lands in the
+    "downloaded / seeding" column rather than with the in-progress ones."""
+    try:
+        torrents = client.get_torrents_export()
+    except Exception as e:
+        return _err(e)
+    names_map = db.get_custom_names_map()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "name", "status", "percent_done",
+        "magnet_downloading_paused", "magnet_downloaded_seeding",
+    ])
+    for t in sorted(torrents, key=lambda x: (x.get("name") or "").lower()):
+        h = t.get("hashString") or ""
+        name = names_map.get(h) or t.get("name") or ""
+        # magnetLink is empty until the daemon has fetched metadata; fall back
+        # to a bare btih magnet so no torrent exports without a usable link.
+        magnet = t.get("magnetLink") or (f"magnet:?xt=urn:btih:{h}" if h else "")
+        pct = t.get("percentDone") or 0
+        complete = pct >= 1.0
+        writer.writerow([
+            name,
+            _EXPORT_STATUS_LABELS.get(t.get("status"), "Unknown"),
+            f"{pct * 100:.1f}",
+            "" if complete else magnet,
+            magnet if complete else "",
+        ])
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="torrents-{ts}.csv"',
+        },
+    )
 
 
 @app.route("/api/torrent/<int:tid>")
