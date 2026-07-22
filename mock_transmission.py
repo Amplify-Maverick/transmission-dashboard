@@ -331,6 +331,29 @@ class MockTransmissionClient:
     def get_stats_torrents(self):
         return list(_FAKE_TORRENTS)
 
+    def get_torrent_files(self, ids):
+        out = []
+        for t in _FAKE_TORRENTS:
+            if t["id"] not in ids:
+                continue
+            size = t.get("totalSize", 0)
+            done = int(size * (t.get("percentDone") or 0))
+            out.append({
+                "id": t["id"],
+                "hashString": t.get("hashString"),
+                "downloadDir": t.get("downloadDir", "/downloads"),
+                "name": t.get("name"),
+                "files": [{
+                    "name": f"{t.get('name')}/{t.get('name')}.mkv",
+                    "length": size,
+                    "bytesCompleted": done,
+                }],
+            })
+        return out
+
+    def get_incomplete_dir(self):
+        return None
+
     def get_session_stats(self):
         up = sum(t.get("uploadedEver", 0) for t in _FAKE_TORRENTS)
         dn = sum(t.get("downloadedEver", 0) for t in _FAKE_TORRENTS)

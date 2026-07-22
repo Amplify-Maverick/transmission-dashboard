@@ -730,6 +730,11 @@ body {
     white-space: nowrap;
 }
 
+/* display:inline-flex above beats the UA's [hidden] rule — hide explicitly,
+   or setMeta() silently does nothing and eta/seeders/leechers/bitrate show
+   on every card regardless of status. */
+.meta-item[hidden] { display: none; }
+
 .meta-label {
     color: var(--muted);
     font-size: 11px;

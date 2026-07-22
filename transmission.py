@@ -236,6 +236,36 @@ class TransmissionClient:
         )
         return result.get("arguments", {}).get("torrents", [])
 
+    def get_torrent_files(self, ids):
+        """Per-file names, declared sizes and completion for the given ids.
+
+        Only used by the bitrate probe, which needs a file's *final* size
+        (`length`) rather than what's landed so far — Transmission
+        preallocates, so on-disk size says nothing about progress.
+        """
+        if not ids:
+            return []
+        result = self.request("torrent-get", {
+            "ids": list(ids),
+            "fields": ["id", "hashString", "downloadDir", "name", "files"],
+        })
+        return result.get("arguments", {}).get("torrents", [])
+
+    def get_incomplete_dir(self):
+        """Return the daemon's incomplete-dir, or None when it's disabled.
+
+        In-progress files live here rather than under the torrent's
+        downloadDir, so anything reading bytes off disk mid-download has to
+        look in both places.
+        """
+        result = self.request("session-get", {
+            "fields": ["incomplete-dir", "incomplete-dir-enabled"],
+        })
+        args = result.get("arguments", {})
+        if not args.get("incomplete-dir-enabled"):
+            return None
+        return (args.get("incomplete-dir") or "").strip() or None
+
     def start(self, id):
         return self.request("torrent-start", {"ids": [id]})
 

@@ -451,6 +451,14 @@
             return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
         }
 
+        // Media bitrate, so decimal Mbps the way encoders quote it — not the
+        // 1024-based units formatSpeed uses for transfer rates.
+        function formatBitrate(bps) {
+            if (!bps || bps <= 0) return '—';
+            if (bps >= 1e6) return (bps / 1e6).toFixed(1) + ' Mbps';
+            return Math.round(bps / 1e3) + ' kbps';
+        }
+
         function formatEta(seconds) {
             if (seconds === null || seconds === undefined || seconds < 0) return 'Unknown';
             if (seconds < 60) return seconds + 's';
@@ -565,6 +573,7 @@
                             <span class="meta-item" data-meta="ratio"><span class="meta-label">ratio</span><span class="meta-value" data-field="ratio"></span></span>
                             <span class="meta-item" data-meta="eta"><span class="meta-label">eta</span><span class="meta-value" data-field="eta"></span></span>
                             <span class="meta-item" data-meta="size"><span class="meta-label">size</span><span class="meta-value" data-field="size"></span></span>
+                            <span class="meta-item" data-meta="bitrate" hidden><span class="meta-label">bitrate</span><span class="meta-value" data-field="bitrate"></span></span>
                             <span class="status-pill" data-field="status"></span>
                         </div>
                     </div>
@@ -1110,6 +1119,14 @@
             setMeta(card, 'seeders', isDl);
             setMeta(card, 'leechers', isSeed);
             setMeta(card, 'eta', !isComplete);
+
+            // Only the "Downloading / Paused" column carries this, and only
+            // once ffprobe has managed to read a runtime — plenty of
+            // torrents (no video, header not downloaded yet, no ffprobe on
+            // the host) never produce one, so the slot stays hidden.
+            const bps = bitratesById.get(t.id);
+            if (bps) setField(card, 'bitrate', formatBitrate(bps));
+            setMeta(card, 'bitrate', !isComplete && !!bps);
         }
 
         function setMeta(card, name, show) {
@@ -1352,6 +1369,9 @@
                 currentTorrents = Array.isArray(data) ? data : [];
                 render();
                 setLive(true);
+                // Needs the fresh list to know which ids to ask about; runs
+                // detached so an ffprobe backlog can't stall the main poll.
+                pollBitrates();
             } catch (err) {
                 console.error('Poll failed:', err);
                 setLive(false);
@@ -1412,6 +1432,55 @@
                 }
             } catch (_) {} finally {
                 copyStatesBusy = false;
+            }
+        }
+
+        let bitratesById = new Map();
+        let bitratesBusy = false;
+        async function pollBitrates() {
+            if (bitratesBusy) return;
+            // Ask only about the left column — completed torrents don't show
+            // the field, and each unknown costs the server an ffprobe.
+            const want = currentTorrents
+                .filter(t => (t.percentDone || 0) < 1 && t.hashString)
+                .map(t => ({ id: t.id, hash: t.hashString }));
+            if (!want.length) {
+                if (bitratesById.size) bitratesById = new Map();
+                return;
+            }
+            bitratesBusy = true;
+            try {
+                const res = await fetch('/api/torrents/bitrates', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ torrents: want }),
+                    cache: 'no-store',
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                const next = new Map();
+                for (const [k, v] of Object.entries((data && data.bitrates) || {})) {
+                    const id = parseInt(k, 10);
+                    if (!Number.isNaN(id) && v && v.bps > 0) next.set(id, v.bps);
+                }
+                // Bitrates are fixed per file, so this settles after the
+                // first successful probe — repaint only what actually moved.
+                const changed = new Set();
+                for (const [id, bps] of next) {
+                    if (bitratesById.get(id) !== bps) changed.add(id);
+                }
+                for (const id of bitratesById.keys()) {
+                    if (!next.has(id)) changed.add(id);
+                }
+                bitratesById = next;
+                for (const id of changed) {
+                    const card = cardsById.get(id);
+                    const t = findTorrent(id);
+                    if (card && t) updateCard(card, t);
+                }
+            } catch (_) {} finally {
+                bitratesBusy = false;
             }
         }
 

@@ -2,6 +2,7 @@ import base64
 import hmac
 import json
 import os
+import queue
 import re
 import shlex
 import socket
@@ -903,6 +904,167 @@ def _group_videos_by_season(videos, root):
     for k in groups:
         groups[k].sort()
     return groups, unclassified
+
+
+# ----- media bitrate (file size / movie runtime) -----
+
+# The "Downloading / Paused" column shows each torrent's finished media
+# bitrate. Runtime comes from ffprobe reading whatever is already on disk;
+# size is the *declared* final length from Transmission rather than the
+# bytes landed so far, so the figure is the finished file's bitrate from the
+# first probe instead of one that creeps upwards as pieces arrive.
+
+# Containers that carry duration in a header near the start of the file, so
+# ffprobe reports the whole runtime off a partial download. Everything else
+# (AVI, MPEG-TS, …) makes ffprobe estimate from the bytes it can see, which
+# on an incomplete file yields a truncated runtime and a wildly inflated
+# bitrate — those we only probe once the file is complete.
+_HEADER_DURATION_EXTS = (".mkv", ".webm", ".mp4", ".m4v", ".mov")
+
+# A probe that came back empty is usually "the header hasn't downloaded
+# yet", which fixes itself — retry, but not on every poll.
+_BITRATE_RETRY_S = 180
+_BITRATE_CACHE_MAX = 500
+
+_bitrate_lock = threading.Lock()
+_bitrate_cache = {}       # hashString -> {bps, bytes, duration, ts}
+_bitrate_pending = set()  # hashStrings currently queued or in flight
+_bitrate_jobs = queue.Queue()
+_bitrate_worker = None
+
+
+def _probe_media_duration(path):
+    """Runtime of `path` in seconds via ffprobe, or None if unreadable.
+
+    Returns None when ffprobe isn't installed — the UI just omits the
+    bitrate rather than showing an error, since this is a nicety.
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             "--", path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        d = float((r.stdout or "").strip())
+    except ValueError:
+        return None
+    # Guard against ffprobe reporting the runtime of a readable prefix.
+    # Nothing worth a bitrate readout is under half a minute.
+    return d if d >= 30 else None
+
+
+def _bitrate_probe_target(tid, expect_hash, incomplete_dir):
+    """Pick the file to probe: (path on disk, declared bytes, is_complete).
+
+    The largest video file stands in for the torrent — for a movie that's
+    the movie, and for a season pack it's a representative episode, which is
+    the number you'd compare against a quality target either way.
+    """
+    rows = client.get_torrent_files([tid])
+    if not rows:
+        return None
+    row = rows[0]
+    # Ids are reassigned when the daemon restarts; if this id now holds a
+    # different torrent, whatever we probe belongs to someone else.
+    if expect_hash and row.get("hashString") != expect_hash:
+        return None
+    download_dir = row.get("downloadDir") or ""
+
+    best = None
+    for f in row.get("files") or []:
+        rel = f.get("name") or ""
+        low = rel.lower()
+        if not low.endswith(VIDEO_EXTS):
+            continue
+        if os.path.basename(low).startswith("sample"):
+            continue
+        if set(os.path.dirname(low).split("/")) & SKIP_DIRS:
+            continue
+        length = int(f.get("length") or 0)
+        if length <= 0:
+            continue
+        if best is None or length > best[0]:
+            best = (length, rel, int(f.get("bytesCompleted") or 0))
+    if best is None:
+        return None
+    length, rel, completed = best
+
+    # Transmission parks in-progress files under incomplete-dir when it's
+    # enabled, and suffixes them with .part while pieces are still missing.
+    roots = [download_dir] + ([incomplete_dir] if incomplete_dir else [])
+    for root in roots:
+        if not root:
+            continue
+        base = os.path.join(root, rel)
+        for candidate in (base, base + ".part"):
+            if os.path.isfile(candidate):
+                return candidate, length, completed >= length
+    return None
+
+
+def _compute_bitrate(tid, expect_hash, incomplete_dir):
+    """Return bits-per-second for the torrent's main video, or None."""
+    target = _bitrate_probe_target(tid, expect_hash, incomplete_dir)
+    if not target:
+        return None
+    path, length, is_complete = target
+    stem = path[:-5] if path.endswith(".part") else path
+    if not is_complete and not stem.lower().endswith(_HEADER_DURATION_EXTS):
+        return None
+    duration = _probe_media_duration(path)
+    if not duration:
+        return None
+    return length * 8.0 / duration, length, duration
+
+
+def _bitrate_worker_loop():
+    while True:
+        tid, thash = _bitrate_jobs.get()
+        entry = {"bps": None, "bytes": None, "duration": None, "ts": time.time()}
+        try:
+            incomplete_dir = client.get_incomplete_dir()
+        except Exception:
+            incomplete_dir = None
+        try:
+            got = _compute_bitrate(tid, thash, incomplete_dir)
+            if got:
+                bps, nbytes, duration = got
+                entry = {"bps": bps, "bytes": nbytes,
+                         "duration": duration, "ts": time.time()}
+        except Exception:
+            pass
+        with _bitrate_lock:
+            _bitrate_cache[thash] = entry
+            _bitrate_pending.discard(thash)
+            if len(_bitrate_cache) > _BITRATE_CACHE_MAX:
+                for stale in sorted(_bitrate_cache,
+                                    key=lambda k: _bitrate_cache[k]["ts"]
+                                    )[:len(_bitrate_cache) - _BITRATE_CACHE_MAX]:
+                    _bitrate_cache.pop(stale, None)
+
+
+def _ensure_bitrate_worker():
+    """Start the probe thread on first use.
+
+    Single worker on purpose: ffprobe on a Pi reading a file that's actively
+    being written is not something to run a dozen of at once, and the result
+    is cached forever once it lands.
+    """
+    global _bitrate_worker
+    with _bitrate_lock:
+        if _bitrate_worker is None or not _bitrate_worker.is_alive():
+            _bitrate_worker = threading.Thread(
+                target=_bitrate_worker_loop, daemon=True,
+                name="bitrate-probe",
+            )
+            _bitrate_worker.start()
 
 
 def _tag_copied(tid):
@@ -3795,6 +3957,62 @@ def api_torrents_details():
         return jsonify({"ok": True, "torrents": torrents})
     except Exception as e:
         return _err(e)
+
+
+@app.route("/api/torrents/bitrates", methods=["POST"])
+@login_required
+def api_torrent_bitrates():
+    """Media bitrate (declared file size / runtime) for the given torrents.
+
+    Answers from cache only and queues anything unknown for the background
+    probe, so the 5s poll never waits on ffprobe. Callers send the hash
+    alongside the id because ids are reassigned across daemon restarts while
+    the cache key has to stay stable.
+    """
+    data = request.get_json(silent=True) or {}
+    items = data.get("torrents")
+    if not isinstance(items, list):
+        return _err("torrents must be a list", 400)
+
+    want = []
+    for it in items[:200]:
+        if not isinstance(it, dict):
+            continue
+        thash = (it.get("hash") or "").strip()
+        if not thash:
+            continue
+        try:
+            want.append((int(it.get("id")), thash))
+        except (TypeError, ValueError):
+            continue
+
+    out = {}
+    queued = []
+    now = time.time()
+    with _bitrate_lock:
+        for tid, thash in want:
+            entry = _bitrate_cache.get(thash)
+            if entry and entry["bps"]:
+                out[str(tid)] = {
+                    "bps": entry["bps"],
+                    "bytes": entry["bytes"],
+                    "duration": entry["duration"],
+                }
+                continue
+            # A miss that failed recently, or is already in flight, waits.
+            if entry and now - entry["ts"] < _BITRATE_RETRY_S:
+                continue
+            if thash in _bitrate_pending:
+                continue
+            _bitrate_pending.add(thash)
+            queued.append((tid, thash))
+
+    if queued:
+        _ensure_bitrate_worker()
+        for job in queued:
+            _bitrate_jobs.put(job)
+
+    return jsonify({"ok": True, "bitrates": out})
 
 
 _TR_ERROR_KIND = {

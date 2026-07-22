@@ -19,11 +19,14 @@ Runs comfortably on a Raspberry Pi or small VPS behind gunicorn + systemd.
 - For the media-copy feature: `ssh` and `rsync` on this host, and key-based
   SSH access to the media server
 - For the tunnel indicator (optional): `wireguard-tools` (`wg`) on this host
+- For the media-bitrate readout (optional): `ffprobe` (from `ffmpeg`) on this
+  host, which must also be able to read the download directory. Without it
+  the bitrate is simply omitted from the cards.
 
 System packages (Debian/Ubuntu example):
 
 ```bash
-sudo apt install python3 python3-venv rsync openssh-client
+sudo apt install python3 python3-venv rsync openssh-client ffmpeg
 ```
 
 ---
