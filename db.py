@@ -506,23 +506,40 @@ def get_lifetime_stats():
 def get_copy_history_daily(days=30):
     """Bytes copied to the media server per calendar day (UTC), oldest first.
     finished_at is ISO8601 UTC, so its first 10 chars are the YYYY-MM-DD date
-    and lexicographic comparison against the cutoff is chronological."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    and lexicographic comparison against the cutoff is chronological.
+
+    Every day in the window is returned, including the idle ones as zeros. The
+    grouped query alone only yields days that had a copy, and a chart plotting
+    those evenly draws four scattered copies over a month as four adjacent
+    days — the gaps are the story, so they have to be in the series."""
+    days = int(days)
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days - 1)
     c = _conn()
     rows = c.execute(
         """SELECT substr(finished_at, 1, 10) AS day,
                   COUNT(*) AS copies,
                   COALESCE(SUM(bytes_transferred), 0) AS bytes
            FROM copy_history
+           -- compared against the bare date, not substr(finished_at,...), so
+           -- idx_copy_history_finished still applies: ISO8601 sorts
+           -- lexicographically, so "2026-06-23T04:00" > "2026-06-23".
            WHERE status = 'done' AND finished_at >= ?
            GROUP BY day
            ORDER BY day ASC""",
-        (cutoff,),
+        (start.isoformat(),),
     ).fetchall()
-    return [
-        {"day": r["day"], "copies": r["copies"], "bytes": r["bytes"]}
-        for r in rows
-    ]
+    by_day = {r["day"]: r for r in rows}
+    out = []
+    for i in range(days):
+        day = (start + timedelta(days=i)).isoformat()
+        r = by_day.get(day)
+        out.append({
+            "day": day,
+            "copies": r["copies"] if r else 0,
+            "bytes": r["bytes"] if r else 0,
+        })
+    return out
 
 
 # ---------- metrics time-series ----------

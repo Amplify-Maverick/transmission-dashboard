@@ -358,7 +358,8 @@
                         <h2 class="system-card-title">Media transfers</h2>
                         <span class="system-card-sub">Copied to media server · last 30 days</span>
                     </header>
-                    <div class="chart-box" id="chart-copies-daily"></div>
+                    <p class="chart-caption" id="copies-daily-sub"></p>
+                    <div class="chart-box chart-box--tall" id="chart-copies-daily"></div>
                 </section>
             </div>
         </div>
@@ -929,12 +930,56 @@
                 { color: '--blue', fmtValue: fmtCount });
         }
 
+        // "2026-07-14" is a UTC calendar day, so read it back as one — passing
+        // it to new Date() and formatting locally shifts the label a day west
+        // of UTC and mislabels every bar.
+        const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        function dayLabel(iso) {
+            const p = String(iso).split('-');
+            const d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+            if (isNaN(d.getTime())) return iso;
+            return `${DOW[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]}`;
+        }
+
+        // Axis top for a byte scale: round the *step* up to a readable number
+        // within the unit the labels will use, so the gridlines come out as
+        // 0 / 25 / 50 / 75 GB rather than base-10 artifacts like 93.1 GB.
+        const BYTE_STEPS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 16, 20, 25,
+                            32, 40, 50, 64, 80, 100, 128, 160, 200, 256, 320,
+                            400, 512, 640, 800, 1024];
+        function niceMaxBytes(peak, gridN) {
+            if (!(peak > 0)) return 1;
+            let unit = 1;
+            while (peak / unit >= 1024 && unit < Math.pow(1024, 5)) unit *= 1024;
+            const raw = peak / unit / gridN;
+            const step = BYTE_STEPS.find(s => s >= raw) || Math.ceil(raw);
+            return step * gridN * unit;
+        }
+
         function renderCopiesDaily(data) {
             if (!window.Charts || !data) return;
             const daily = (data.history || {}).copies_daily || [];
-            Charts.bars($('chart-copies-daily'),
-                daily.map(d => ({ label: d.day.slice(5), value: d.bytes })),
-                { color: '--green', fmtValue: fmtBytes });
+            const active = daily.filter(d => d.bytes > 0).length;
+            const bytes = daily.reduce((a, d) => a + d.bytes, 0);
+            setText('copies-daily-sub', active
+                ? `${fmtBytes(bytes)} across ${fmtCount(active)} active ${active === 1 ? 'day' : 'days'}`
+                : '');
+            Charts.barsTime($('chart-copies-daily'),
+                daily.map(d => ({
+                    label: dayLabel(d.day),
+                    value: d.bytes,
+                    sub: d.copies ? `${d.copies} ${d.copies === 1 ? 'copy' : 'copies'}` : 'no copies',
+                })),
+                {
+                    color: '--green',
+                    fmtValue: fmtBytes,
+                    niceMax: niceMaxBytes,
+                    fmtX: (d, i) => daily[i].day.slice(5),
+                    label: 'Bytes copied to the media server per day',
+                    emptyText: 'No copies in the last 30 days',
+                });
         }
 
         // ---- per-torrent transfer ----

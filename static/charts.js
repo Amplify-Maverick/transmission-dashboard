@@ -10,7 +10,8 @@
  *   Charts.sparkline(el, points, opts)   line + soft fill, no axes
  *   Charts.areaLines(el, series, opts)   multi-series time chart w/ hover
  *   Charts.barsH(el, items, opts)        horizontal ranked bars
- *   Charts.bars(el, items, opts)         vertical bars (histograms / daily)
+ *   Charts.bars(el, items, opts)         vertical bars (histograms)
+ *   Charts.barsTime(el, items, opts)     daily bars w/ y axis + hover readout
  *   Charts.donut(el, segments, opts)     ring for categorical mix
  *
  * `points` is an array of {t, v} (t = epoch ms or any monotonic x, v = value).
@@ -52,6 +53,42 @@
   }
 
   function clearEl(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+  // ---- shared y-axis furniture for the axis-bearing charts ----
+  // Size the left gutter to the widest y label instead of assuming one fits in
+  // a fixed 58px — "8.54 MB/s" doesn't, and the overflow is silently clipped at
+  // the SVG edge rather than pushing the plot over. .chart-axis is 10px
+  // monospace, so ~6px per character.
+  function yGutter(vMax, gridN, fmtY) {
+    const labels = [];
+    for (let i = 0; i <= gridN; i++) labels.push(String(fmtY(vMax * i / gridN)));
+    const widest = labels.reduce((a, s) => Math.max(a, s.length), 0);
+    return { labels, padL: Math.min(96, Math.max(34, Math.ceil(widest * 6.1) + 12)) };
+  }
+
+  function yGrid(gut, vMax, gridN, sy, padL, xRight) {
+    let g = '';
+    for (let i = 0; i <= gridN; i++) {
+      const y = sy(vMax * i / gridN).toFixed(1);
+      g += `<line class="chart-grid" x1="${padL}" x2="${xRight}" y1="${y}" y2="${y}"/>`;
+      g += `<text class="chart-axis" x="${padL - 8}" y="${(+y + 3.5).toFixed(1)}" ` +
+        `text-anchor="end">${esc(gut.labels[i])}</text>`;
+    }
+    return g;
+  }
+
+  // Bar with a flat baseline and rounded top corners. `rx` on a <rect> rounds
+  // all four, which detaches the bar from the axis; only the data end rounds.
+  function barPath(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h);
+    const b = y + h;
+    if (r <= 0) return `M${x} ${y}H${(x + w).toFixed(1)}V${b.toFixed(1)}H${x}Z`;
+    return `M${x} ${b.toFixed(1)}V${(y + r).toFixed(1)}` +
+      `Q${x} ${y.toFixed(1)} ${(x + r).toFixed(1)} ${y.toFixed(1)}` +
+      `H${(x + w - r).toFixed(1)}` +
+      `Q${(x + w).toFixed(1)} ${y.toFixed(1)} ${(x + w).toFixed(1)} ${(y + r).toFixed(1)}` +
+      `V${b.toFixed(1)}Z`;
+  }
 
   // ---- sparkline: single series, soft area fill, no axes ----
   function sparkline(el, points, opts) {
@@ -119,27 +156,15 @@
     }));
     vMax = Math.max(niceMax(vMax), opts.minYMax || 1);
 
-    // Size the left gutter to the widest y label instead of assuming one
-    // fits in a fixed 58px — "8.54 MB/s" doesn't, and the overflow is
-    // silently clipped at the SVG edge rather than pushing the plot over.
-    // .chart-axis is 10px monospace, so ~6px per character.
     const gridN = 3;
-    const yLabels = [];
-    for (let i = 0; i <= gridN; i++) yLabels.push(String(fmtY(vMax * i / gridN)));
-    const widest = yLabels.reduce((a, s) => Math.max(a, s.length), 0);
-    const padL = Math.min(96, Math.max(34, Math.ceil(widest * 6.1) + 12));
+    const gut = yGutter(vMax, gridN, fmtY);
+    const padL = gut.padL;
 
     const sx = t => xMax === xMin ? padL
       : padL + (t - xMin) / (xMax - xMin) * (W - padL - padR);
     const sy = v => H - padB - (v / vMax) * (H - padT - padB);
 
-    let grid = '';
-    for (let i = 0; i <= gridN; i++) {
-      const gv = vMax * i / gridN;
-      const y = sy(gv).toFixed(1);
-      grid += `<line class="chart-grid" x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}"/>`;
-      grid += `<text class="chart-axis" x="${padL - 8}" y="${(+y + 3.5).toFixed(1)}" text-anchor="end">${esc(fmtY(gv))}</text>`;
-    }
+    const grid = yGrid(gut, vMax, gridN, sy, padL, W - padR);
     // x labels: first, middle, last
     let xlab = '';
     if (fmtX) {
@@ -280,6 +305,140 @@
     }).join('') + `</div>`;
   }
 
+  // ---- barsTime: daily bars on a real value axis, with hover ----
+  // items: [{ label, value }] — one entry per period, already gap-filled by the
+  // caller so even spacing means even time. Unlike bars() this carries a y axis
+  // and a tooltip, because a plain silhouette answers "which day was biggest"
+  // but not "was that 900 MB or 90 GB".
+  function barsTime(el, items, opts) {
+    opts = opts || {};
+    const H = opts.height || 190;
+    const color = cssVar(opts.color || '--blue');
+    const fmtV = opts.fmtValue || (v => String(v));
+    const fmtX = opts.fmtX || (d => d.label);
+    const padR = 10, padT = 20, padB = 22;
+    clearEl(el);
+
+    const rows = (items || []).filter(d => d && isFinite(d.value));
+    const total = rows.reduce((a, d) => a + d.value, 0);
+    if (!rows.length || total <= 0) {
+      el.innerHTML = `<div class="chart-empty">${esc(opts.emptyText || 'No data')}</div>`;
+      return;
+    }
+    // Match areaLines: render 1:1 in the element's pixel space, falling back to
+    // VBW while the tab is still hidden — the next poll re-renders at real width.
+    const W = Math.max(320, Math.round(el.clientWidth) || VBW);
+
+    const gridN = 3;
+    const peak = rows.reduce((a, d) => d.value > a.value ? d : a, rows[0]);
+    // niceMax rounds base-10 on the raw number, which is meaningless once the
+    // axis is labelled in binary units — a 61 GB peak becomes a "93.1 GB" top.
+    // Callers with a unit pass their own rounder.
+    const vMax = Math.max(
+      opts.niceMax ? opts.niceMax(peak.value, gridN) : niceMax(peak.value),
+      opts.minYMax || 1);
+    const gut = yGutter(vMax, gridN, fmtV);
+    const padL = gut.padL;
+    const sy = v => H - padB - (v / vMax) * (H - padT - padB);
+    const grid = yGrid(gut, vMax, gridN, sy, padL, W - padR);
+
+    const slot = (W - padL - padR) / rows.length;
+    const gap = slot > 6 ? 2 : 1;            // 2px surface gap between bars
+    const bw = Math.max(1, slot - gap);
+    const base = sy(0);
+
+    let marks = '';
+    rows.forEach((d, i) => {
+      if (d.value <= 0) return;              // an idle day is a gap, not a stub
+      const y = Math.min(sy(d.value), base - 2);   // keep tiny days visible
+      marks += `<path class="barT" data-i="${i}" d="${barPath(padL + i * slot + gap / 2, y, bw, base - y, 4)}" fill="${color}"/>`;
+    });
+
+    // Direct-label the peak only: one anchored number means the chart reads
+    // without hover, which is the only mode iOS Safari actually has.
+    const pi = rows.indexOf(peak);
+    const ptxt = fmtV(peak.value);
+    const phalf = ptxt.length * 3;
+    const px = Math.max(padL + phalf,
+      Math.min(W - padR - phalf, padL + pi * slot + slot / 2));
+    const peakLabel = `<text class="chart-peak" x="${px.toFixed(1)}" ` +
+      `y="${(sy(peak.value) - 6).toFixed(1)}" text-anchor="middle">${esc(ptxt)}</text>`;
+
+    // Thin x labels so 30 dates don't collide, each sitting under its own bar.
+    // Budget by pixels, not row count: the same stride that's airy at 1200px
+    // overlaps at phone width.
+    const TICK_W = 52;                                  // "07-14" at 10px mono + air
+    const avail = W - padL - padR;
+    const maxTicks = Math.max(2, Math.min(7, Math.floor(avail / TICK_W)));
+    const stride = Math.max(1, Math.ceil(rows.length / maxTicks));
+    const last = rows.length - 1;
+    const cxOf = i => padL + i * slot + slot / 2;
+    let xlab = '';
+    rows.forEach((d, i) => {
+      if (i !== last && i % stride !== 0) return;
+      // The last date always shows, so drop any tick that would crowd it.
+      if (i !== last && cxOf(last) - cxOf(i) < TICK_W) return;
+      const txt = fmtX(d, i);
+      if (!txt) return;
+      const half = txt.length * 3;
+      const cx = Math.max(padL + half, Math.min(W - padR - half, cxOf(i)));
+      xlab += `<text class="chart-axis" x="${cx.toFixed(1)}" y="${H - 6}" text-anchor="middle">${esc(txt)}</text>`;
+    });
+
+    const svg =
+      `<svg viewBox="0 0 ${W} ${H}" class="chart-svg" role="img" ` +
+      `aria-label="${esc(opts.label || 'Daily totals')}: peak ${esc(fmtV(peak.value))} on ${esc(peak.label)}">` +
+      `${grid}<rect class="chart-band" x="0" y="${padT}" width="0" height="${H - padT - padB}" style="display:none"/>` +
+      `${marks}${peakLabel}${xlab}</svg>`;
+    el.innerHTML = `<div class="chart-plot">${svg}<div class="chart-tip" hidden></div></div>`;
+
+    // ---- hover / touch readout ----
+    // A full-height band per slot, not the bar itself: a 3px bar is an
+    // impossible hit target, and idle days need a readout too.
+    const svgEl = el.querySelector('svg');
+    const band = el.querySelector('.chart-band');
+    const tip = el.querySelector('.chart-tip');
+    const plot = el.querySelector('.chart-plot');
+    let lastI = -1;
+    function onMove(ev) {
+      const rect = svgEl.getBoundingClientRect();
+      const clientX = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+      const vbx = (clientX - rect.left) / rect.width * W;
+      const i = Math.max(0, Math.min(rows.length - 1, Math.floor((vbx - padL) / slot)));
+      if (i !== lastI) {
+        const prev = el.querySelector('.barT.is-hot');
+        if (prev) prev.classList.remove('is-hot');
+        const hot = el.querySelector(`.barT[data-i="${i}"]`);
+        if (hot) hot.classList.add('is-hot');
+        band.setAttribute('x', (padL + i * slot).toFixed(1));
+        band.setAttribute('width', slot.toFixed(1));
+        band.style.display = '';
+        const d = rows[i];
+        tip.innerHTML = `<div class="chart-tip-x">${esc(d.label)}</div>` +
+          `<div class="chart-tip-row"><span class="chart-swatch" style="background:${color}"></span>` +
+          `<span class="chart-tip-val">${esc(fmtV(d.value))}</span></div>` +
+          (d.sub ? `<div class="chart-tip-sub">${esc(d.sub)}</div>` : '');
+        tip.hidden = false;
+        lastI = i;
+      }
+      const pr = plot.getBoundingClientRect();
+      let left = clientX - pr.left + 10;
+      if (left + 140 > pr.width) left = clientX - pr.left - 150;
+      tip.style.left = Math.max(0, left) + 'px';
+    }
+    function onLeave() {
+      const prev = el.querySelector('.barT.is-hot');
+      if (prev) prev.classList.remove('is-hot');
+      band.style.display = 'none';
+      tip.hidden = true;
+      lastI = -1;
+    }
+    plot.addEventListener('pointermove', onMove);
+    plot.addEventListener('pointerleave', onLeave);
+    plot.addEventListener('touchmove', onMove, { passive: true });
+    plot.addEventListener('touchend', onLeave);
+  }
+
   // ---- donut: categorical mix ----
   // segments: [{ label, value, color:'--green' }]
   function donut(el, segments, opts) {
@@ -316,5 +475,5 @@
       `aria-label="${esc(segs.map(s => s.label + ' ' + fmtV(s.value)).join(', '))}">${arcs}${center}</svg>${legend}</div>`;
   }
 
-  window.Charts = { sparkline, areaLines, barsH, bars, donut };
+  window.Charts = { sparkline, areaLines, barsH, bars, barsTime, donut };
 })();
