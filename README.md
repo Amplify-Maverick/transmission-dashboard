@@ -448,12 +448,22 @@ history — a detected leak is logged as an error event. The live indicator
 remains the continuous second-by-second check; the tracker test is the
 periodic end-to-end confirmation.
 
-Note that a regular torrent's magnet (an Ubuntu ISO, say) can't serve as the
-test magnet: ordinary trackers don't report the IP they saw, so there would
-be nothing to verify — only IP-echo trackers give that view. The test never
-downloads content either way: the torrent is stopped the moment the tracker's
-answer is recorded and removed when the run ends, so even a content magnet
-pasted by mistake transfers nothing.
+The test magnet must be from an **IP-echo tracker** — one that returns your
+IP inside the announce reply (a deliberate "failure reason" whose text is your
+address). A regular torrent's magnet (an Ubuntu ISO, say) can't serve as the
+test: ordinary trackers accept the announce silently and never report the IP
+they saw, so there's nothing to read — the test concludes *inconclusive*.
+Some leak-test sites (ipleak.net, ipMagnet, BTGuard) are also the wrong kind:
+they stash your IP and show it on *their* web page rather than echoing it in
+the reply, so they read as inconclusive here too. A known-good hosted echo
+tracker is the open-source [`torrent-ip-checker`](https://github.com/AKK9/torrent-ip-checker);
+TorGuard's *Check My Torrent IP* is another.
+
+Nothing downloads: if the magnet's announce ever *succeeds* — the signature of
+a real content tracker, and the only download risk — the test stops the
+torrent at once and reports inconclusive. An echo tracker never succeeds (it
+"fails" every announce by design), so its IP-bearing reply is read normally,
+and the test torrent is removed when the run ends either way.
 
 Two optional knobs tune the checks (both commented in `.env.example`):
 `WG_HANDSHAKE_STALE_SEC` (default 180 — how old a handshake may be before the

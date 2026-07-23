@@ -4237,7 +4237,6 @@ _tracker_test = {
     "started_at": None,     # ISO wall time, for the UI
     "started_mono": None,   # monotonic, for the timeout
     "expected": None,       # {"v4": ..., "v6": ...} exit IPs, fetched once/run
-    "stopped_after_announce": False,
     "result": None,         # last finished run's result dict
 }
 
@@ -4468,7 +4467,6 @@ def _tracker_test_start_core(settings):
             "started_at": datetime.now(timezone.utc).isoformat(),
             "started_mono": time.monotonic(),
             "expected": None,
-            "stopped_after_announce": False,
             "result": None,
         })
     # Every run (manual or scheduled) resets the periodic timer — persisted
@@ -4509,28 +4507,18 @@ def _tracker_test_evaluate():
         return {"running": False, "result": result}
 
     announced = False
+    succeeded = False
     messages = []
     for tr in torrent.get("trackerStats") or []:
         if tr.get("hasAnnounced") or tr.get("lastAnnounceSucceeded"):
             announced = True
+        if tr.get("lastAnnounceSucceeded"):
+            succeeded = True
         for field in ("lastAnnounceResult", "lastScrapeResult"):
             msg = (tr.get(field) or "").strip()
             if msg:
                 messages.append(msg)
     seen_ips = _extract_public_ips(" ".join(messages))
-
-    if announced and not state.get("stopped_after_announce"):
-        # The announce we needed is on record — stop the torrent so a magnet
-        # with real content can't download anything for the rest of the test
-        # window. trackerStats stay readable on a stopped torrent, and echo
-        # magnets are data-less anyway, so this costs nothing.
-        try:
-            client.stop(tid)
-        except Exception:
-            pass
-        with _tracker_test_lock:
-            if _tracker_test["torrent_id"] == tid:
-                _tracker_test["stopped_after_announce"] = True
 
     # Fetch the expected exit IPs once per run (two outbound HTTPS calls) —
     # only once the tracker has something to compare, or we'd pay the cost on
@@ -4561,12 +4549,37 @@ def _tracker_test_evaluate():
             "seen_ips": seen_ips, "expected": expected, "announced": announced,
         })
         return {"running": False, "result": result}
+
+    # A *successful* announce that carried no IP means this magnet's tracker is
+    # an ordinary tracker, not an IP-echo one: echo trackers reply with a
+    # failure whose text is your IP, while a plain success has no IP to read
+    # (those services show it on their own web page instead). A success is also
+    # the only real download risk, so stop the torrent now and conclude rather
+    # than waiting out the timeout. Crucially we do NOT stop on a merely
+    # attempted/failed announce — the echo tracker's answer *is* a failure, and
+    # the old code stopped the torrent the instant `hasAnnounced` flipped
+    # (which precedes the reply), killing the announce before its IP-bearing
+    # response was ever recorded. That was the false "no IP to check".
+    if succeeded and not seen_ips:
+        try:
+            client.stop(tid)
+        except Exception:
+            pass
+        result = _tracker_test_finish({
+            "verdict": "inconclusive",
+            "problems": ["the tracker accepted the announce but reported no IP "
+                         "— this looks like a normal tracker, not an IP-echo "
+                         "service (which returns your IP in the announce "
+                         "reply). Use an echo magnet."],
+            "seen_ips": seen_ips, "expected": expected, "announced": announced,
+        })
+        return {"running": False, "result": result}
+
     if elapsed > _TRACKER_TEST_TIMEOUT_SEC:
-        note = ("the tracker answered but its response contained no IP to "
-                "check — use a magnet from an IP-echo service"
-                if announced else
-                "the tracker never answered the announce (dead magnet, or no "
-                "outbound path)")
+        note = ("the tracker never answered the announce (dead magnet, or no "
+                "outbound path)" if not announced else
+                "the tracker answered but its reply contained no IP — the "
+                "magnet's tracker isn't an IP-echo tracker")
         result = _tracker_test_finish({
             "verdict": "inconclusive", "problems": [note],
             "seen_ips": seen_ips, "expected": expected, "announced": announced,

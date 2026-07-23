@@ -123,26 +123,70 @@ class ScheduleDueTests(unittest.TestCase):
         self.assertTrue(app._tracker_test_due(self._settings(), old, now=now))
 
 
-class StopAfterAnnounceTests(unittest.TestCase):
-    """Once the announce is recorded the test torrent must be stopped, so a
-    content magnet pasted into the field can never keep downloading."""
+class StopTimingTests(unittest.TestCase):
+    """The stop guard must fire on a *successful* announce (a content magnet =
+    download risk), never on a merely attempted/failed one — the echo tracker
+    replies with a FAILURE carrying the IP, and stopping on that early signal
+    was killing the reply before it landed (the false 'no IP to check')."""
 
-    def test_evaluate_stops_torrent_after_announce(self):
-        with patch.object(app, "_tracker_test", {
-                "running": True, "torrent_id": 42,
+    def _state(self, **over):
+        base = {"running": True, "torrent_id": 42,
                 "started_at": "2026-07-22T00:00:00+00:00",
                 "started_mono": app.time.monotonic(),
-                "expected": None, "stopped_after_announce": False,
-                "result": None}), \
+                "expected": None, "result": None}
+        base.update(over)
+        return base
+
+    def test_failed_echo_announce_is_not_stopped(self):
+        """Announce failed (echo tracker) and the IP hasn't been parsed yet:
+        the torrent must keep running so the reply can be recorded — no stop."""
+        with patch.object(app, "_tracker_test", self._state()), \
+             patch("app.client.get_tracker_stats", return_value={
+                 "id": 42,
+                 "trackerStats": [{"hasAnnounced": True,
+                                   "lastAnnounceSucceeded": False,
+                                   "lastAnnounceResult": "connecting…"}]}), \
+             patch("app.client.stop") as m_stop:
+            payload = app._tracker_test_evaluate()
+        m_stop.assert_not_called()
+        self.assertTrue(payload["running"])
+
+    def test_successful_announce_without_ip_is_stopped_and_concluded(self):
+        """A real tracker accepted the announce (download risk) but echoed no
+        IP: stop immediately and conclude inconclusive rather than waiting."""
+        with patch.object(app, "_tracker_test", self._state()), \
              patch("app.client.get_tracker_stats", return_value={
                  "id": 42,
                  "trackerStats": [{"hasAnnounced": True,
                                    "lastAnnounceSucceeded": True,
-                                   "lastAnnounceResult": "no ip here"}]}), \
-             patch("app.client.stop") as m_stop:
+                                   "lastAnnounceResult": "Success"}]}), \
+             patch("app.client.stop") as m_stop, \
+             patch("app.client.remove"):
             payload = app._tracker_test_evaluate()
         m_stop.assert_called_once_with(42)
-        self.assertTrue(payload["running"])  # still waiting for an IP echo
+        self.assertFalse(payload["running"])
+        self.assertEqual(payload["result"]["verdict"], "inconclusive")
+
+    def test_failed_echo_announce_with_ip_resolves_without_stop(self):
+        """The echo tracker's failure reply carries the IP: it's parsed and the
+        run resolves via the verdict path (finish removes the torrent) — the
+        early stop must not have interrupted it."""
+        with patch.object(app, "_tracker_test", self._state()), \
+             patch("app.client.get_tracker_stats", return_value={
+                 "id": 42,
+                 "trackerStats": [{"hasAnnounced": True,
+                                   "lastAnnounceSucceeded": False,
+                                   "lastAnnounceResult":
+                                       "Your IP address is 93.184.216.34"}]}), \
+             patch("app._public_ip_from_source", return_value="93.184.216.34"), \
+             patch("app._bare_global_ipv6_addrs", return_value=[]), \
+             patch("app.config.TUNNEL_IFACE", "wg-test"), \
+             patch("app.client.stop") as m_stop, \
+             patch("app.client.remove"):
+            payload = app._tracker_test_evaluate()
+        m_stop.assert_not_called()
+        self.assertFalse(payload["running"])
+        self.assertEqual(payload["result"]["verdict"], "pass")
 
 
 class SettingsParsingTests(unittest.TestCase):
