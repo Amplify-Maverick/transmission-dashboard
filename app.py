@@ -2534,6 +2534,23 @@ def api_system():
         return _err(e)
 
 
+@app.route("/api/cpu")
+@login_required
+def api_cpu():
+    """Just the CPU utilisation, for the 1s live poll on the System page.
+
+    Deliberately cheap: unlike /api/system this skips the /proc scan for the
+    process count, the disk statvfs, sensor temp reads and memory/network
+    probes, so it's safe to hit once a second. Shares psutil's process-wide
+    cpu_percent baseline with /api/system, so whichever fires more often sets
+    the averaging window for both.
+    """
+    try:
+        return jsonify({"ok": True, "percent": psutil.cpu_percent(interval=None)})
+    except Exception as e:
+        return _err(e)
+
+
 # ---------- aggregate stats ----------
 
 # Fixed bucket edges for the System page distribution charts. Ratio bands are

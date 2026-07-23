@@ -397,10 +397,13 @@
     <script src="{{ url_for('static', filename='updates.js') }}"></script>
     <script src="{{ url_for('static', filename='charts.js') }}"></script>
     <script>
-        // 5s, not 2s: each /api/system hit runs five psutil probes
-        // (including a full /proc scan for the process count) on the Pi,
-        // and the difference is invisible for slow-moving system metrics.
+        // 5s for the full snapshot: each /api/system hit runs five psutil
+        // probes (including a full /proc scan for the process count), and the
+        // difference is invisible for slow-moving metrics like disk, temp and
+        // load average. CPU utilisation is the one fast-moving number, so it
+        // gets its own cheap /api/cpu poll at 1s (see pollCpu below).
         const POLL_MS = 5000;
+        const CPU_POLL_MS = 1000;
         const TUNNEL_POLL_MS = 10000;
         const STATS_POLL_MS = 15000;
         let unauthorizedHandled = false;
@@ -413,14 +416,18 @@
         let pollBusy = false;
         let tunnelBusy = false;
         let statsBusy = false;
+        let cpuBusy = false;
+        let cpuTimer = null;
 
         // ---- rolling in-memory buffers for live charts ----
         // Capped arrays appended on each poll; they build a live window while
         // the page is open and reset on reload. Persisted ranges are fetched
         // separately from /api/metrics/history.
         const SYS_BUF_MAX = 360;   // ~30 min at 5s
+        const CPU_BUF_MAX = 300;   // ~5 min at 1s
         const STATS_BUF_MAX = 240; // ~60 min at 15s
         const sysBuf = [];         // {t, cpu, mem, disk, rx, tx}
+        const cpuBuf = [];         // {t, cpu} — the 1s CPU-only poll
         const statsBuf = [];       // {t, down, up, active, peers, ratio}
         function pushCapped(arr, item, max) {
             arr.push(item);
@@ -945,6 +952,31 @@
             }
         }
 
+        // Cheap 1s poll for just the CPU number, bar and its live sparkline.
+        // Everything else on the CPU card (core counts, temp, load average) is
+        // slow-moving and stays on the 5s render() from poll().
+        async function pollCpu() {
+            if (cpuBusy) return;
+            cpuBusy = true;
+            try {
+                const res = await fetch('/api/cpu', { cache: 'no-store' });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                if (data.ok === false) throw new Error(data.error || 'request failed');
+                document.getElementById('cpu-percent').textContent = fmtPct(data.percent);
+                setBar('cpu-bar', data.percent);
+                pushCapped(cpuBuf, { t: Date.now(), cpu: data.percent }, CPU_BUF_MAX);
+                if (window.Charts) {
+                    Charts.sparkline($('cpu-spark'), livePts(cpuBuf, 'cpu'), { color: '--blue' });
+                }
+            } catch (err) {
+                /* transient — the 5s poll and next tick recover the display */
+            } finally {
+                cpuBusy = false;
+            }
+        }
+
         // ---- chart rendering ----
         const $ = id => document.getElementById(id);
 
@@ -967,7 +999,7 @@
 
         function renderSparks() {
             if (!window.Charts) return;
-            Charts.sparkline($('cpu-spark'), livePts(sysBuf, 'cpu'), { color: '--blue' });
+            Charts.sparkline($('cpu-spark'), livePts(cpuBuf, 'cpu'), { color: '--blue' });
             Charts.sparkline($('mem-spark'), livePts(sysBuf, 'mem'), { color: '--blue' });
             Charts.sparkline($('net-rx-spark'), livePts(sysBuf, 'rx'), { color: '--blue', height: 30 });
             Charts.sparkline($('net-tx-spark'), livePts(sysBuf, 'tx'), { color: '--green', height: 30 });
@@ -1420,6 +1452,7 @@
 
         function start() {
             poll();
+            pollCpu();
             pollTunnel();
             pollStats();
             renderPerTorrent();   // show a state immediately, not a blank box
@@ -1428,6 +1461,7 @@
             // fetch here rather than waiting for a range button to be clicked.
             setTrendRange(trendRange);
             pollTimer = setInterval(poll, POLL_MS);
+            cpuTimer = setInterval(pollCpu, CPU_POLL_MS);
             tunnelTimer = setInterval(pollTunnel, TUNNEL_POLL_MS);
             statsTimer = setInterval(pollStats, STATS_POLL_MS);
             // Buckets are 15 min wide, so anything faster is wasted work.
@@ -1442,6 +1476,7 @@
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                if (cpuTimer) { clearInterval(cpuTimer); cpuTimer = null; }
                 if (tunnelTimer) { clearInterval(tunnelTimer); tunnelTimer = null; }
                 if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
                 if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
