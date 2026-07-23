@@ -1,7 +1,9 @@
 import base64
 import csv
 import hmac
+import http.client
 import io
+import ipaddress
 import json
 import os
 import queue
@@ -14,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -3167,22 +3170,33 @@ def _is_global_ipv6(addr):
     return a[:1] in ("2", "3")
 
 
-def _host_has_bare_global_ipv6(tunnel_iface):
-    """Does any non-tunnel, non-loopback interface carry a globally-routable
-    IPv6? If so, transmission can leak v6 traffic out the bare link unless it's
-    pinned to the tunnel's own v6. Returns True/False, or None if interface
-    enumeration failed (can't tell)."""
+def _bare_global_ipv6_addrs(tunnel_iface):
+    """Every globally-routable IPv6 on a non-tunnel, non-loopback interface —
+    the addresses that could leak to the internet. Returns a list, or None if
+    interface enumeration failed (can't tell)."""
     try:
         all_addrs = psutil.net_if_addrs()
     except Exception:
         return None
+    out = []
     for ifname, addrs in all_addrs.items():
         if ifname == tunnel_iface or ifname == "lo":
             continue
         for a in addrs:
             if a.family == socket.AF_INET6 and _is_global_ipv6(a.address):
-                return True
-    return False
+                out.append(a.address.split("%")[0].lower())
+    return out
+
+
+def _host_has_bare_global_ipv6(tunnel_iface):
+    """Does any non-tunnel, non-loopback interface carry a globally-routable
+    IPv6? If so, transmission can leak v6 traffic out the bare link unless it's
+    pinned to the tunnel's own v6. Returns True/False, or None if interface
+    enumeration failed (can't tell)."""
+    addrs = _bare_global_ipv6_addrs(tunnel_iface)
+    if addrs is None:
+        return None
+    return bool(addrs)
 
 
 def _transmission_bind6_check(iface_addr6):
@@ -4179,6 +4193,356 @@ def api_update_check_config_set():
     except OSError as e:
         return _err(f"failed to write app config: {e}")
     return jsonify({"ok": True, "mode": mode, "interval_seconds": interval})
+
+
+# ---------- end-to-end tracker leak test (opt-in) ----------
+#
+# The tunnel indicator verifies bind + routing + live sockets from inside the
+# host — but the only view that exercises transmission's *actual announce
+# path* end-to-end is what a real tracker on the internet saw. IP-echo
+# trackers (TorGuard's "Check My Torrent IP", ipleak.net's torrent detection)
+# hand out a magnet whose tracker reports the announcing IP back inside the
+# announce-result message, which transmission exposes over RPC.
+#
+# The test, when enabled in Settings and run from the System page:
+#   1. adds the configured echo magnet (unpaused, labelled ip-leak-test);
+#   2. polls its trackerStats and extracts any public IPs from the
+#      announce/scrape result strings;
+#   3. fetches the tunnel's expected exit IPs by calling a what's-my-IP URL
+#      with the TCP connection source-bound to the tunnel's v4/v6 addresses;
+#   4. verdict: leak if the tracker saw anything that isn't the tunnel exit
+#      (or saw the host's own bare global IPv6 — definitive even without the
+#      exit fetch), pass if everything matches, inconclusive otherwise;
+#   5. removes the test magnet and logs a leak to the event history.
+#
+# No background thread: the System page polls /status while the test runs;
+# a timed-out or abandoned run is cleaned up lazily (by label) on the next
+# start. Off by default — it adds a real torrent and calls external services.
+
+_TRACKER_TEST_LABEL = "ip-leak-test"
+_TRACKER_TEST_TIMEOUT_SEC = 120
+_TRACKER_TEST_DEFAULT_ECHO_URL = "https://am.i.mullvad.net/ip"
+
+_tracker_test_lock = threading.Lock()
+_tracker_test = {
+    "running": False,
+    "torrent_id": None,
+    "started_at": None,     # ISO wall time, for the UI
+    "started_mono": None,   # monotonic, for the timeout
+    "expected": None,       # {"v4": ..., "v6": ...} exit IPs, fetched once/run
+    "result": None,         # last finished run's result dict
+}
+
+
+def _tracker_test_settings():
+    stored = _read_app_config().get("tracker_test")
+    out = {"enabled": False, "magnet": "", "echo_url": _TRACKER_TEST_DEFAULT_ECHO_URL}
+    if isinstance(stored, dict):
+        if isinstance(stored.get("enabled"), bool):
+            out["enabled"] = stored["enabled"]
+        if isinstance(stored.get("magnet"), str):
+            out["magnet"] = stored["magnet"].strip()
+        if isinstance(stored.get("echo_url"), str) and stored["echo_url"].strip():
+            out["echo_url"] = stored["echo_url"].strip()
+    return out
+
+
+def _public_ip_from_source(source_ip, url):
+    """GET `url` with the TCP connection source-bound to `source_ip`, expecting
+    a plain-text IP body (am.i.mullvad.net/ip, api.ipify.org, …). Binding the
+    source forces the reply to reveal that address's public face — bound to the
+    tunnel IP it returns the VPN exit. Returns the IP string or None."""
+    if not source_ip:
+        return None
+    try:
+        u = urllib.parse.urlsplit(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return None
+        cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+        conn = cls(u.hostname, u.port, timeout=10,
+                   source_address=(source_ip, 0))
+        try:
+            path = u.path or "/"
+            if u.query:
+                path += "?" + u.query
+            conn.request("GET", path, headers={
+                "User-Agent": "transmission-dashboard-leaktest",
+                "Accept": "text/plain",
+            })
+            resp = conn.getresponse()
+            body = resp.read(256).decode("utf-8", "replace").strip()
+        finally:
+            conn.close()
+        if resp.status != 200:
+            return None
+        return str(ipaddress.ip_address(body))
+    except Exception:
+        return None
+
+
+def _extract_public_ips(text):
+    """Public (globally-routable) IPs mentioned in tracker message text, e.g.
+    'Success! Your torrent client IP is: 198.51.100.7'. Private/loopback/
+    link-local matches are dropped — only an internet-visible address is
+    evidence of anything. Returns a sorted list of canonical strings."""
+    found = set()
+    for token in re.findall(r"[0-9A-Fa-f:.]+", text or ""):
+        if "." not in token and ":" not in token:
+            continue
+        for candidate in (token, token.strip(".")):
+            try:
+                ip = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if ip.is_global:
+                found.add(str(ip))
+            break
+    return sorted(found)
+
+
+def _tracker_test_verdict(seen_ips, expected_v4, expected_v6, bare_v6_addrs):
+    """Pure verdict logic (unit-tested). Returns (verdict, problems):
+      'leak'         — the tracker saw an IP that is provably not the tunnel
+                       exit: the host's own bare global IPv6, or anything
+                       differing from a successfully-fetched expected exit.
+      'pass'         — it saw at least one IP and every one matched the
+                       corresponding expected exit.
+      'inconclusive' — it saw nothing parseable, or saw an IP we had no
+                       expected exit to judge against. Never silently 'pass'.
+    """
+    seen4 = [ip for ip in seen_ips if ":" not in ip]
+    seen6 = [ip.lower() for ip in seen_ips if ":" in ip]
+    bare6 = {a.lower() for a in (bare_v6_addrs or [])}
+    problems = []
+    unjudged = []
+    for ip in seen4:
+        if expected_v4 is None:
+            unjudged.append(ip)
+        elif ip != expected_v4:
+            problems.append(
+                f"tracker saw {ip} — not the tunnel exit {expected_v4}")
+    for ip in seen6:
+        if ip in bare6:
+            problems.append(
+                f"tracker saw the host's own bare IPv6 {ip} — definite leak")
+        elif expected_v6 is None:
+            unjudged.append(ip)
+        elif ip != expected_v6.lower():
+            problems.append(
+                f"tracker saw {ip} — not the tunnel's IPv6 exit {expected_v6}")
+    if problems:
+        return "leak", problems
+    if not seen_ips:
+        return "inconclusive", ["the tracker response contained no IP to check"]
+    if unjudged:
+        return "inconclusive", [
+            f"tracker saw {ip} but the expected exit IP could not be fetched "
+            "to compare against" for ip in unjudged
+        ]
+    return "pass", []
+
+
+def _tracker_test_finish(result):
+    """Store the final result, clear running state, remove the test magnet,
+    and log the outcome to the event history."""
+    with _tracker_test_lock:
+        tid = _tracker_test["torrent_id"]
+        result = dict(result,
+                      started_at=_tracker_test["started_at"],
+                      finished_at=datetime.now(timezone.utc).isoformat())
+        _tracker_test.update({
+            "running": False, "torrent_id": None,
+            "started_mono": None, "expected": None,
+            "result": result,
+        })
+    if tid is not None:
+        try:
+            client.remove(tid, delete_local_data=True)
+        except Exception:
+            pass  # lazily cleaned up by label on the next start
+    try:
+        if result["verdict"] == "leak":
+            db.log_event("tunnel.leak_test", "error",
+                         "Tracker leak test FAILED: " + "; ".join(result["problems"]))
+        elif result["verdict"] == "pass":
+            db.log_event("tunnel.leak_test", "info",
+                         "Tracker leak test passed: tracker saw "
+                         + ", ".join(result["seen_ips"]))
+    except Exception:
+        pass
+    return result
+
+
+@app.route("/api/tracker-test/config", methods=["GET"])
+@login_required
+def api_tracker_test_config_get():
+    return jsonify({"ok": True, **_tracker_test_settings()})
+
+
+@app.route("/api/tracker-test/config", methods=["POST"])
+@login_required
+def api_tracker_test_config_set():
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled")
+    if not isinstance(enabled, bool):
+        return _err("enabled must be true or false", 400)
+    magnet = (data.get("magnet") or "").strip()
+    if magnet:
+        if not magnet.startswith("magnet:?"):
+            return _err("magnet must be a magnet:? URI", 400)
+        if "tr=" not in magnet:
+            return _err(
+                "the magnet has no tracker (tr=) — an echo magnet from an IP "
+                "leak-test service is required", 400)
+    echo_url = (data.get("echo_url") or "").strip() or _TRACKER_TEST_DEFAULT_ECHO_URL
+    scheme = urllib.parse.urlsplit(echo_url).scheme
+    if scheme not in ("http", "https"):
+        return _err("echo_url must be an http(s) URL", 400)
+    cfg = _read_app_config()
+    cfg["tracker_test"] = {"enabled": enabled, "magnet": magnet, "echo_url": echo_url}
+    try:
+        _write_app_config(cfg)
+    except OSError as e:
+        return _err(f"failed to write app config: {e}")
+    return jsonify({"ok": True, **_tracker_test_settings()})
+
+
+@app.route("/api/tracker-test/start", methods=["POST"])
+@login_required
+def api_tracker_test_start():
+    settings = _tracker_test_settings()
+    if not settings["enabled"]:
+        return _err("the tracker leak test is disabled — enable it in Settings", 400)
+    if not settings["magnet"]:
+        return _err("no test magnet configured — paste one in Settings "
+                    "(see the hint there for where to get one)", 400)
+    with _tracker_test_lock:
+        if _tracker_test["running"]:
+            return _err("a tracker test is already running", 409)
+        # Clean up leftovers from an interrupted earlier run before adding.
+        try:
+            for t in client.find_torrents_by_label(_TRACKER_TEST_LABEL):
+                client.remove(t["id"], delete_local_data=True)
+        except Exception:
+            pass
+        try:
+            res = client.add_magnet(settings["magnet"], paused=False)
+        except Exception as e:
+            return _err(f"failed to add the test magnet: {e}")
+        args = res.get("arguments", {}) if isinstance(res, dict) else {}
+        added = args.get("torrent-added") or args.get("torrent-duplicate") or {}
+        tid = added.get("id")
+        if tid is None:
+            return _err("transmission did not return a torrent id for the test magnet")
+        try:
+            client.set_labels(tid, [_TRACKER_TEST_LABEL])
+        except Exception:
+            pass
+        _tracker_test.update({
+            "running": True,
+            "torrent_id": tid,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_mono": time.monotonic(),
+            "expected": None,
+            "result": None,
+        })
+    return jsonify({"ok": True, "torrent_id": tid})
+
+
+@app.route("/api/tracker-test/status")
+@login_required
+def api_tracker_test_status():
+    with _tracker_test_lock:
+        state = dict(_tracker_test)
+    if not state["running"]:
+        return jsonify({"ok": True, "running": False, "result": state["result"]})
+
+    tid = state["torrent_id"]
+    try:
+        torrent = client.get_tracker_stats(tid)
+    except Exception:
+        torrent = None
+    if torrent is None:
+        result = _tracker_test_finish({
+            "verdict": "inconclusive",
+            "problems": ["the test torrent disappeared before the tracker answered"],
+            "seen_ips": [], "expected": state.get("expected"), "announced": False,
+        })
+        return jsonify({"ok": True, "running": False, "result": result})
+
+    announced = False
+    messages = []
+    for tr in torrent.get("trackerStats") or []:
+        if tr.get("hasAnnounced") or tr.get("lastAnnounceSucceeded"):
+            announced = True
+        for field in ("lastAnnounceResult", "lastScrapeResult"):
+            msg = (tr.get(field) or "").strip()
+            if msg:
+                messages.append(msg)
+    seen_ips = _extract_public_ips(" ".join(messages))
+
+    # Fetch the expected exit IPs once per run (two outbound HTTPS calls) —
+    # only once the tracker has something to compare, or we'd pay the cost on
+    # every poll of a slow announce.
+    expected = state.get("expected")
+    if expected is None and seen_ips:
+        iface = config.TUNNEL_IFACE
+        info = _tunnel_status(iface) if iface else {}
+        echo = _tracker_test_settings()["echo_url"]
+        expected = {
+            "v4": _public_ip_from_source(info.get("interface_address"), echo),
+            "v6": _public_ip_from_source(info.get("interface_address6"), echo),
+        }
+        with _tracker_test_lock:
+            if _tracker_test["running"] and _tracker_test["torrent_id"] == tid:
+                _tracker_test["expected"] = expected
+
+    verdict, problems = ("pending", [])
+    if seen_ips:
+        bare6 = _bare_global_ipv6_addrs(config.TUNNEL_IFACE) or []
+        verdict, problems = _tracker_test_verdict(
+            seen_ips, (expected or {}).get("v4"), (expected or {}).get("v6"), bare6)
+
+    elapsed = time.monotonic() - (state["started_mono"] or 0)
+    if verdict in ("leak", "pass"):
+        result = _tracker_test_finish({
+            "verdict": verdict, "problems": problems,
+            "seen_ips": seen_ips, "expected": expected, "announced": announced,
+        })
+        return jsonify({"ok": True, "running": False, "result": result})
+    if elapsed > _TRACKER_TEST_TIMEOUT_SEC:
+        note = ("the tracker answered but its response contained no IP to "
+                "check — use a magnet from an IP-echo service"
+                if announced else
+                "the tracker never answered the announce (dead magnet, or no "
+                "outbound path)")
+        result = _tracker_test_finish({
+            "verdict": "inconclusive", "problems": [note],
+            "seen_ips": seen_ips, "expected": expected, "announced": announced,
+        })
+        return jsonify({"ok": True, "running": False, "result": result})
+
+    return jsonify({
+        "ok": True, "running": True, "verdict": "pending",
+        "announced": announced, "seen_ips": seen_ips,
+        "elapsed_seconds": int(elapsed),
+        "timeout_seconds": _TRACKER_TEST_TIMEOUT_SEC,
+        "started_at": state["started_at"],
+    })
+
+
+@app.route("/api/tracker-test/stop", methods=["POST"])
+@login_required
+def api_tracker_test_stop():
+    with _tracker_test_lock:
+        running = _tracker_test["running"]
+    if not running:
+        return jsonify({"ok": True, "running": False})
+    result = _tracker_test_finish({
+        "verdict": "cancelled", "problems": [],
+        "seen_ips": [], "expected": None, "announced": False,
+    })
+    return jsonify({"ok": True, "running": False, "result": result})
 
 
 @app.route("/api/settings", methods=["GET"])

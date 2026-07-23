@@ -417,6 +417,36 @@ interval (~45 s by default), and tracker DNS lookups are resolved by the
 system resolver, which the bind can't confine — use a VPN-provided DNS if
 that metadata matters.
 
+### End-to-end tracker leak test (optional)
+
+All seven checks observe the host from the inside. The one view they can't
+give you is what a **real tracker on the internet** saw when Transmission
+announced — the actual end-to-end path, including anything the host-side
+checks might be structurally blind to. The optional tracker leak test covers
+that:
+
+1. In **Settings → Tracker IP leak test**, enable the test and paste a magnet
+   from an IP-echo service — one whose tracker reports the IP it saw back in
+   the tracker status message. TorGuard's *Check My Torrent IP* page generates
+   one; ipleak.net's *Torrent address detection* magnet also works.
+2. A **Run tracker IP test** button appears on the System page's Tunnel card.
+   Running it adds the magnet (data-less, labelled `ip-leak-test`), waits for
+   the announce, and extracts the echoed IP from the tracker's response.
+3. The dashboard fetches the tunnel's expected exit IP by calling a plain-text
+   what's-my-IP URL (default `am.i.mullvad.net/ip`, configurable) with the
+   connection source-bound to the tunnel address, then compares.
+4. **PASS** if everything the tracker saw matches the tunnel exit; red
+   **LEAK** if it saw anything else (seeing the host's own bare global IPv6 is
+   flagged as a definite leak even if the exit lookup failed); *inconclusive*
+   if the tracker echoed nothing to check — never a silent pass. Results land
+   in the event history, and the test magnet is removed afterwards.
+
+It's off by default because it adds a real (data-less) torrent and contacts
+two external services. It's a point-in-time probe, not a monitor — the live
+indicator remains the continuous check; run this when you want end-to-end
+confirmation (after VPN config changes, provider switches, or just for peace
+of mind).
+
 Two optional knobs tune the checks (both commented in `.env.example`):
 `WG_HANDSHAKE_STALE_SEC` (default 180 — how old a handshake may be before the
 peer counts as down) and `TUNNEL_CHECK_CACHE_TTL` (default 30 — how long a

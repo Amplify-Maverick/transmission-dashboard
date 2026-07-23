@@ -324,6 +324,34 @@ class MockTransmissionClient:
     def get_peer_port(self):
         return 51413
 
+    def get_tracker_stats(self, id):
+        # Canned echo-tracker response so the leak test is demo-able in mock
+        # mode: the tracker "saw" a documentation IP.
+        return {
+            "id": id,
+            "hashString": "f" * 40,
+            "labels": ["ip-leak-test"],
+            "trackerStats": [{
+                "hasAnnounced": True,
+                "lastAnnounceSucceeded": True,
+                "lastAnnounceResult": "Success! Your torrent client IP is: 93.184.216.77",
+                "lastScrapeResult": "",
+            }],
+        }
+
+    def find_torrents_by_label(self, label):
+        return []
+
+    def add_magnet(self, magnet, paused=True, download_dir=None):
+        return {"result": "success",
+                "arguments": {"torrent-added": {"id": 9999, "hashString": "f" * 40}}}
+
+    def set_labels(self, id, labels):
+        return {"result": "success", "arguments": {}}
+
+    def remove(self, id, delete_local_data=False):
+        return {"result": "success", "arguments": {}}
+
     def set_download_dir(self, path):
         _MOCK_SESSION["download-dir"] = path
         return {"result": "success", "arguments": {}}

@@ -269,6 +269,10 @@
                         </div>
                     </div>
                     <p class="metric-hint" id="tunnel-bind">—</p>
+                    <div id="leaktest-block" hidden style="margin-top: 10px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;">
+                        <button type="button" class="btn btn-sm" id="leaktest-run-btn">Run tracker IP test</button>
+                        <span class="metric-hint" id="leaktest-status" style="margin: 0;"></span>
+                    </div>
                 </section>
 
                 <section class="system-card system-card-wide" id="card-host">
@@ -675,6 +679,83 @@
             }
             document.getElementById('tunnel-bind').textContent = bindText;
         }
+
+        // --- tracker leak test (opt-in via Settings → Tracker IP leak test) ---
+        const ltBlock = document.getElementById('leaktest-block');
+        const ltBtn = document.getElementById('leaktest-run-btn');
+        const ltStatus = document.getElementById('leaktest-status');
+        let ltTimer = null;
+
+        function ltRender(text, color) {
+            ltStatus.textContent = text;
+            ltStatus.style.color = color || '';
+        }
+
+        function ltShowResult(result) {
+            if (!result) { ltRender(''); return; }
+            if (result.verdict === 'pass') {
+                ltRender(`PASS — tracker saw ${(result.seen_ips || []).join(', ')}, matching the tunnel exit`, 'var(--green)');
+            } else if (result.verdict === 'leak') {
+                ltRender('LEAK — ' + (result.problems || []).join('; '), 'var(--red)');
+            } else if (result.verdict === 'cancelled') {
+                ltRender('Cancelled', 'var(--muted)');
+            } else {
+                ltRender('Inconclusive — ' + (result.problems || []).join('; '), 'var(--yellow)');
+            }
+        }
+
+        async function ltPoll(initial) {
+            try {
+                const res = await fetch('/api/tracker-test/status');
+                if (!res.ok) return;
+                const d = await res.json();
+                if (d.running) {
+                    ltBtn.disabled = true;
+                    const note = (d.seen_ips && d.seen_ips.length)
+                        ? `tracker saw ${d.seen_ips.join(', ')}, comparing…`
+                        : (d.announced ? 'tracker answered, waiting for the IP echo…'
+                                       : 'announcing to tracker…');
+                    ltRender(`Running (${d.elapsed_seconds}s): ${note}`, 'var(--muted)');
+                    if (!ltTimer) ltTimer = setInterval(ltPoll, 3000);
+                } else {
+                    ltBtn.disabled = false;
+                    if (ltTimer) { clearInterval(ltTimer); ltTimer = null; }
+                    if (!initial || d.result) ltShowResult(d.result);
+                }
+            } catch (err) { /* transient poll error — next tick retries */ }
+        }
+
+        async function ltInit() {
+            try {
+                const res = await fetch('/api/tracker-test/config');
+                if (!res.ok) return;
+                const cfg = await res.json();
+                if (cfg.enabled) {
+                    ltBlock.hidden = false;
+                    ltPoll(true);  // resume a running test / show the last result
+                }
+            } catch (err) { /* stays hidden */ }
+        }
+
+        ltBtn.addEventListener('click', async () => {
+            ltBtn.disabled = true;
+            ltRender('Starting…', 'var(--muted)');
+            try {
+                const res = await fetch('/api/tracker-test/start', { method: 'POST' });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok || d.ok === false) {
+                    ltRender(d.error || `Failed to start (HTTP ${res.status})`, 'var(--red)');
+                    ltBtn.disabled = false;
+                    return;
+                }
+                ltRender('Running: adding test magnet…', 'var(--muted)');
+                if (!ltTimer) ltTimer = setInterval(ltPoll, 3000);
+            } catch (err) {
+                ltRender('Failed to start: ' + err.message, 'var(--red)');
+                ltBtn.disabled = false;
+            }
+        });
+        ltInit();
 
         function setText(id, value) {
             const el = document.getElementById(id);

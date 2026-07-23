@@ -335,6 +335,27 @@ class TransmissionClient:
         """
         return self._read_bind_setting("bind-address-ipv6", "_settings_bind6_cache")
 
+    def get_tracker_stats(self, id):
+        """One torrent's tracker state. The tracker leak test reads the
+        announce-result strings here: IP-echo trackers (TorGuard's Check My
+        Torrent IP, ipleak.net) report the IP they saw for us inside that
+        message, which is the only end-to-end view of what a real tracker
+        sees. Returns the torrent dict or None if it's gone."""
+        result = self.request(
+            "torrent-get",
+            {"ids": [id],
+             "fields": ["id", "hashString", "status", "labels", "trackerStats"]},
+        )
+        torrents = result.get("arguments", {}).get("torrents", [])
+        return torrents[0] if torrents else None
+
+    def find_torrents_by_label(self, label):
+        """All torrents carrying `label` — used to clean up leak-test magnets
+        left behind by an interrupted run."""
+        result = self.request("torrent-get", {"fields": ["id", "labels"]})
+        torrents = result.get("arguments", {}).get("torrents", [])
+        return [t for t in torrents if label in (t.get("labels") or [])]
+
     def get_peer_port(self):
         """The daemon's live peer port. Unlike the bind-address fields this is
         still in the session-get RPC on 4.x, so it always reflects the running

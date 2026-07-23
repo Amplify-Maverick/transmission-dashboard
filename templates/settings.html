@@ -291,6 +291,61 @@
                 </div>
             </section>
 
+            <section class="settings-section">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Tracker IP leak test</h2>
+                    <p class="settings-section-hint">
+                        End-to-end check of what a real BitTorrent tracker sees: adds a test magnet
+                        from an IP-echo service, reads the IP the tracker reports back, and compares
+                        it against the tunnel's exit IP. Complements the tunnel indicator — this is
+                        the only check that exercises Transmission's actual announce path. When
+                        enabled, a <strong>Run tracker IP test</strong> button appears on the
+                        System page's Tunnel card.
+                    </p>
+                </header>
+
+                <div class="form-error" id="leaktest-error" hidden></div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="leaktest-enabled-select">Leak test</label>
+                    <select id="leaktest-enabled-select">
+                        <option value="off">Off — hide the test</option>
+                        <option value="on">On — show the Run button on the System page</option>
+                    </select>
+                    <p class="field-hint">
+                        Off by default: running the test adds a (data-less) test torrent to
+                        Transmission and contacts two external services.
+                    </p>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="leaktest-magnet-input">Test magnet</label>
+                    <input type="text" id="leaktest-magnet-input" placeholder="magnet:?xt=urn:btih:…&amp;tr=…" spellcheck="false">
+                    <p class="field-hint">
+                        Paste a magnet from an IP-echo service — one whose tracker reports the IP it
+                        saw inside the tracker status message. TorGuard's <em>Check&nbsp;My&nbsp;Torrent&nbsp;IP</em>
+                        page generates one; ipleak.net's <em>Torrent&nbsp;address&nbsp;detection</em> magnet also
+                        works (its per-session results additionally appear on their page). The magnet
+                        must include a tracker (<code>tr=</code>).
+                    </p>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="leaktest-echo-input">Expected-exit lookup URL</label>
+                    <input type="text" id="leaktest-echo-input" placeholder="https://am.i.mullvad.net/ip" spellcheck="false">
+                    <p class="field-hint">
+                        A plain-text what's-my-IP endpoint (default <code>am.i.mullvad.net/ip</code>;
+                        <code>api.ipify.org</code> also works). The dashboard calls it with the
+                        connection source-bound to the tunnel address to learn which exit IP the
+                        tracker <em>should</em> have seen.
+                    </p>
+                </div>
+
+                <div class="settings-actions">
+                    <button type="button" class="btn btn-primary" id="leaktest-save-btn">Save</button>
+                </div>
+            </section>
+
             <a href="{{ url_for('vpn_binding_guide') }}" class="settings-guide-link">
                 <span class="settings-guide-link-body">
                     <span class="settings-guide-link-title">Binding transmission-daemon to a Mullvad WireGuard tunnel</span>
@@ -1092,6 +1147,78 @@
             el.addEventListener('input', clearUpdateError));
 
         loadUpdateCheckConfig();
+
+        // ---- Tracker IP leak test ----
+        const ltEnabledEl = document.getElementById('leaktest-enabled-select');
+        const ltMagnetEl = document.getElementById('leaktest-magnet-input');
+        const ltEchoEl = document.getElementById('leaktest-echo-input');
+        const ltSaveBtn = document.getElementById('leaktest-save-btn');
+        const ltErrorEl = document.getElementById('leaktest-error');
+
+        function showLeaktestError(msg) {
+            ltErrorEl.textContent = msg;
+            ltErrorEl.hidden = false;
+        }
+        function clearLeaktestError() {
+            ltErrorEl.hidden = true;
+            ltErrorEl.textContent = '';
+        }
+
+        async function loadLeaktestConfig() {
+            try {
+                const res = await fetch('/api/tracker-test/config');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                ltEnabledEl.value = data.enabled ? 'on' : 'off';
+                ltMagnetEl.value = data.magnet || '';
+                ltEchoEl.value = data.echo_url || '';
+            } catch (err) {
+                showLeaktestError('Failed to load leak-test settings: ' + err.message);
+            }
+        }
+
+        async function saveLeaktestConfig() {
+            clearLeaktestError();
+            const enabled = ltEnabledEl.value === 'on';
+            const magnet = ltMagnetEl.value.trim();
+            if (enabled && !magnet) {
+                showLeaktestError('A test magnet is required to enable the leak test — paste one from an IP-echo service.');
+                return;
+            }
+            ltSaveBtn.disabled = true;
+            const prev = ltSaveBtn.textContent;
+            ltSaveBtn.textContent = 'Saving…';
+            try {
+                const res = await fetch('/api/tracker-test/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        enabled: enabled,
+                        magnet: magnet,
+                        echo_url: ltEchoEl.value.trim(),
+                    }),
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                let data = null;
+                try { data = await res.json(); } catch (_) {}
+                if (!res.ok || (data && data.ok === false)) {
+                    throw new Error((data && data.error) || ('HTTP ' + res.status));
+                }
+                toast('Leak-test settings saved', 'success');
+            } catch (err) {
+                showLeaktestError('Save failed: ' + err.message);
+            } finally {
+                ltSaveBtn.disabled = false;
+                ltSaveBtn.textContent = prev;
+            }
+        }
+
+        ltSaveBtn.addEventListener('click', saveLeaktestConfig);
+        [ltEnabledEl, ltMagnetEl, ltEchoEl].forEach(el =>
+            el.addEventListener('input', clearLeaktestError));
+
+        loadLeaktestConfig();
     </script>
     <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
 </body>
