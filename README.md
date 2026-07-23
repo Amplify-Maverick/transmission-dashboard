@@ -158,6 +158,32 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now transmission-dashboard
 ```
 
+#### What to change in the unit file
+
+The template ships with `CHANGE_ME` placeholders — **5 of them, across 4
+values, all in the `[Service]` block.** Replace each:
+
+| Field in the template | Set it to | Example (user `bob`) |
+|-----------------------|-----------|----------------------|
+| `User=CHANGE_ME` | the account that owns the checkout | `User=bob` |
+| `Group=CHANGE_ME` | that account's group (same name on Debian/Ubuntu) | `Group=bob` |
+| `WorkingDirectory=/home/CHANGE_ME/transmission-dashboard` | absolute path to the repo | `/home/bob/transmission-dashboard` |
+| `EnvironmentFile=/home/CHANGE_ME/transmission-dashboard/.env` | absolute path to `.env` | `/home/bob/transmission-dashboard/.env` |
+| `ExecStart=/home/CHANGE_ME/…/.venv/bin/gunicorn` | absolute path to the venv's gunicorn | `/home/bob/transmission-dashboard/.venv/bin/gunicorn` |
+
+Since all three paths sit under the same home directory, the quickest edit is
+a find-and-replace of `CHANGE_ME` → your username throughout the file. Leave
+`--bind 127.0.0.1:5000` alone unless you deliberately want a different port
+(localhost-only is intended — front it with a reverse proxy for external
+access), and leave the `wg`/`CAP_NET_ADMIN` lines as they are (harmless if you
+don't use the tunnel indicator, required if you do).
+
+Confirm no placeholder survived before enabling:
+
+```bash
+grep CHANGE_ME /etc/systemd/system/transmission-dashboard.service   # should print nothing
+```
+
 `enable` is the part that makes it start on boot — it links the unit into
 `multi-user.target` (see the `[Install]` section of the file), so systemd
 launches it every time the machine comes up. `--now` also starts it
