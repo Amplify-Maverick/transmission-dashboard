@@ -188,6 +188,36 @@ class StopTimingTests(unittest.TestCase):
         self.assertFalse(payload["running"])
         self.assertEqual(payload["result"]["verdict"], "pass")
 
+    def test_failed_expected_fetch_is_retried_not_cached(self):
+        """The tracker echoed our IP, but the first expected-exit fetch fails
+        (returns None). The run must NOT cache that failure and idle until the
+        timeout — the next poll must re-fetch and, on success, resolve to a
+        verdict. This is the regression for the 'stuck on Testing…' hang."""
+        state = self._state()
+        tracker = {"id": 42,
+                   "trackerStats": [{"hasAnnounced": True,
+                                     "lastAnnounceSucceeded": False,
+                                     "lastAnnounceResult":
+                                         "Your IP address is 93.184.216.34"}]}
+        with patch.object(app, "_tracker_test", state), \
+             patch("app.client.get_tracker_stats", return_value=tracker), \
+             patch("app._bare_global_ipv6_addrs", return_value=[]), \
+             patch("app.config.TUNNEL_IFACE", "wg-test"), \
+             patch("app.client.stop"), \
+             patch("app.client.remove"), \
+             patch("app._public_ip_from_source",
+                   side_effect=[None, "93.184.216.34"]) as m_fetch:
+            first = app._tracker_test_evaluate()
+            # Fetch failed: still running, not concluded, and the failed None
+            # was not left as a permanent verdict.
+            self.assertTrue(first["running"])
+            second = app._tracker_test_evaluate()
+        # The second poll must have re-attempted the fetch (2 calls total) and
+        # the fresh success resolves the run — proving the failure wasn't cached.
+        self.assertEqual(m_fetch.call_count, 2)
+        self.assertFalse(second["running"])
+        self.assertEqual(second["result"]["verdict"], "pass")
+
 
 class SettingsParsingTests(unittest.TestCase):
     def _with_config(self, stored):

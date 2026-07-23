@@ -346,6 +346,9 @@ class MockTransmissionClient:
         return {"result": "success",
                 "arguments": {"torrent-added": {"id": 9999, "hashString": "f" * 40}}}
 
+    def start_now(self, id):
+        return {"result": "success", "arguments": {}}
+
     def set_labels(self, id, labels):
         return {"result": "success", "arguments": {}}
 
@@ -435,6 +438,9 @@ class MockTransmissionClient:
         return [dict(t) for t in _FAKE_TORRENTS if t["id"] in wanted]
 
     def start(self, id):
+        return {"result": "success", "arguments": {}}
+
+    def start_now(self, id):
         return {"result": "success", "arguments": {}}
 
     def stop(self, id):

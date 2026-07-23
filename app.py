@@ -4478,6 +4478,15 @@ def _tracker_test_start_core(settings):
             client.set_labels(tid, [_TRACKER_TEST_LABEL])
         except Exception:
             pass
+        # Bump the test torrent past the download queue. Added with paused=False
+        # it still lands in "download pending" whenever the daemon is already at
+        # its max active downloads, and a queued torrent never announces — so
+        # the tracker is never contacted and the test hangs until it times out.
+        # torrent-start-now forces it active immediately so the announce fires.
+        try:
+            client.start_now(tid)
+        except Exception:
+            pass
         _tracker_test.update({
             "running": True,
             "torrent_id": tid,
@@ -4541,18 +4550,27 @@ def _tracker_test_evaluate():
     # reply whose IP we failed to parse, from a normal tracker's "Success".
     tracker_message = messages[-1] if messages else None
 
-    # Fetch the expected exit IPs once per run (two outbound HTTPS calls) —
-    # only once the tracker has something to compare, or we'd pay the cost on
-    # every poll of a slow announce.
-    expected = state.get("expected")
-    if expected is None and seen_ips:
+    # Fetch the expected exit IP for each address family the tracker actually
+    # saw us on, so we have something to compare against. Only fetch a family
+    # once we've seen an IP in it (avoids paying the HTTPS cost while the
+    # announce is still pending) and only fetch the ones we don't yet have.
+    #
+    # Critically we must RETRY a family whose fetch previously failed rather
+    # than caching the failure: the old code stored the {"v4": None} result and
+    # never tried again, so a single transient miss left the verdict permanently
+    # "unjudged" — which never concludes and hangs the test on "Testing…" until
+    # the 120s timeout. Re-attempting each poll lets a later success resolve it.
+    expected = dict(state.get("expected") or {})
+    need_v4 = not expected.get("v4") and any(":" not in ip for ip in seen_ips)
+    need_v6 = not expected.get("v6") and any(":" in ip for ip in seen_ips)
+    if need_v4 or need_v6:
         iface = config.TUNNEL_IFACE
         info = _tunnel_status(iface) if iface else {}
         echo = _tracker_test_settings()["echo_url"]
-        expected = {
-            "v4": _public_ip_from_source(info.get("interface_address"), echo),
-            "v6": _public_ip_from_source(info.get("interface_address6"), echo),
-        }
+        if need_v4:
+            expected["v4"] = _public_ip_from_source(info.get("interface_address"), echo)
+        if need_v6:
+            expected["v6"] = _public_ip_from_source(info.get("interface_address6"), echo)
         with _tracker_test_lock:
             if _tracker_test["running"] and _tracker_test["torrent_id"] == tid:
                 _tracker_test["expected"] = expected

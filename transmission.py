@@ -285,6 +285,13 @@ class TransmissionClient:
     def start(self, id):
         return self.request("torrent-start", {"ids": [id]})
 
+    def start_now(self, id):
+        """Start a torrent immediately, bypassing the download queue. The leak
+        test uses this so its magnet announces right away even when the daemon
+        is already at its max active downloads — otherwise the test torrent
+        sits in "download pending" and never contacts the tracker."""
+        return self.request("torrent-start-now", {"ids": [id]})
+
     def stop(self, id):
         return self.request("torrent-stop", {"ids": [id]})
 
