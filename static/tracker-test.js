@@ -45,19 +45,22 @@
             return;
         }
         const ago = fmtAgo(r.finished_at);
+        // Show the age on the chip itself, not just the tooltip — a passing
+        // result is only reassuring if you can see it's recent.
+        const tag = ago ? ` · ${ago}` : '';
         const when = ago ? `\nChecked ${ago}` : '';
         if (r.verdict === 'pass') {
-            set('ok', 'Tracker OK',
+            set('ok', `Tracker OK${tag}`,
                 `Tracker IP test PASSED — tracker saw ${(r.seen_ips || []).join(', ')}, `
                 + `matching the tunnel exit.${when}`);
         } else if (r.verdict === 'leak') {
-            set('down', 'IP leak',
+            set('down', `IP leak${tag}`,
                 `Tracker IP test FAILED — real IP exposed to trackers:\n`
                 + `${(r.problems || []).join('; ')}${when}`);
         } else if (r.verdict === 'cancelled') {
-            set('unknown', 'Test —', `Tracker IP test was cancelled.${when}`);
+            set('unknown', `Test —${tag}`, `Tracker IP test was cancelled.${when}`);
         } else {
-            set('error', 'Test ?',
+            set('error', `Test ?${tag}`,
                 `Tracker IP test inconclusive — ${(r.problems || []).join('; ')}${when}`);
         }
     }
