@@ -335,6 +335,14 @@ class TransmissionClient:
         """
         return self._read_bind_setting("bind-address-ipv6", "_settings_bind6_cache")
 
+    def get_peer_port(self):
+        """The daemon's live peer port. Unlike the bind-address fields this is
+        still in the session-get RPC on 4.x, so it always reflects the running
+        process (including a random port from peer-port-random-on-start). The
+        tunnel check uses it to find the daemon's sockets in /proc/net."""
+        result = self.request("session-get", {"fields": ["peer-port"]})
+        return result.get("arguments", {}).get("peer-port")
+
     def _read_bind_setting(self, field, cache_attr):
         """Shared reader for the bind-address-ipv4/ipv6 options: try the RPC
         first, then fall back to an mtime-cached parse of settings.json. Returns

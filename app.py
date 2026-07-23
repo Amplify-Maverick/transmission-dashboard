@@ -8,6 +8,7 @@ import queue
 import re
 import shlex
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -3113,8 +3114,13 @@ def _transmission_bind_check(iface_addr):
 
 def _route_egress_dev(dst, src):
     """Which interface would a packet to `dst`, sourced from `src`, actually
-    leave by? Returns the device name, or None if it can't be determined
-    (no route, `src` not local, `ip` missing, or unparseable output).
+    leave by? Returns (dev, err): the device name with err=None on success,
+    or (None, reason) when the route couldn't be determined (`ip` missing or
+    timed out, no route, `src` not local, unparseable output).
+
+    Callers MUST treat (None, err) as *unverified* — never as a pass. An
+    earlier version returned a bare None for both "couldn't run ip" and
+    "confirmed fine", which let the leak check silently fail open.
 
     This verifies the piece the bind check can't: binding transmission to the
     tunnel IP only keeps traffic on the tunnel if packets *from* that IP are
@@ -3125,21 +3131,26 @@ def _route_egress_dev(dst, src):
     routing table or scheme puts it there.
     """
     if not src:
-        return None
+        return None, "no source address to probe from"
     try:
         r = subprocess.run(
             ["ip", "route", "get", dst, "from", src],
             capture_output=True, text=True, timeout=5,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    except Exception:
-        return None
-    # On error (e.g. "Network is unreachable") ip writes to stderr and leaves
-    # stdout empty → no dev match → None. A success line looks like:
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        return None, f"ip route get unavailable ({e.__class__.__name__})"
+    except Exception as e:
+        return None, f"ip route get failed ({e})"
+    if r.returncode != 0:
+        # e.g. "Network is unreachable" — no route for this src at all.
+        err = (r.stderr or "").strip() or f"ip exited {r.returncode}"
+        return None, err
+    # A success line looks like:
     #   1.1.1.1 from <src> dev mullvad table 200 ...
     m = re.search(r"\bdev\s+(\S+)", r.stdout or "")
-    return m.group(1) if m else None
+    if not m:
+        return None, "unparseable ip route get output"
+    return m.group(1), None
 
 
 def _is_global_ipv6(addr):
@@ -3201,9 +3212,11 @@ def _ipv6_leak_check(iface, tunnel_addr6):
                   IPv6 to bind to) → a real leak path.
       'route'   — bound to the tunnel v6, but v6 packets from it egress a
                   different interface (routing leak).
-      'unknown' — couldn't enumerate addresses or read the bind setting.
+      'unknown' — couldn't enumerate addresses, read the bind setting, or
+                  verify the v6 egress route.
     """
-    detail = {"host_bare_ipv6": None, "bind6": None, "route_egress_dev6": None}
+    detail = {"host_bare_ipv6": None, "bind6": None, "route_egress_dev6": None,
+              "route_error6": None}
     host_v6 = _host_has_bare_global_ipv6(iface)
     detail["host_bare_ipv6"] = host_v6
     if host_v6 is None:
@@ -3221,11 +3234,77 @@ def _ipv6_leak_check(iface, tunnel_addr6):
         # Bare v6 present and transmission isn't pinned to the tunnel's v6.
         return "leak", detail
     # Pinned to the tunnel v6 — confirm it actually routes out the tunnel.
-    route6 = _route_egress_dev("2606:4700:4700::1111", tunnel_addr6)
+    # Fail closed: an unverifiable route is 'unknown' (amber), not 'safe'.
+    route6, route_err6 = _route_egress_dev("2606:4700:4700::1111", tunnel_addr6)
     detail["route_egress_dev6"] = route6
-    if route6 is not None and route6 != iface:
+    detail["route_error6"] = route_err6
+    if route6 is None:
+        return "unknown", detail
+    if route6 != iface:
         return "route", detail
     return "safe", detail
+
+
+def _proc_hex_to_ip(hexip):
+    """Decode a /proc/net/{tcp,udp}* local-address hex field into a printable
+    IP. v4 is one little-endian 32-bit word (8 hex chars); v6 is four
+    little-endian 32-bit words (32 hex chars). Returns None if undecodable."""
+    try:
+        if len(hexip) == 8:
+            return socket.inet_ntop(socket.AF_INET, struct.pack("<I", int(hexip, 16)))
+        if len(hexip) == 32:
+            packed = b"".join(
+                struct.pack("<I", int(hexip[i:i + 8], 16))
+                for i in range(0, 32, 8)
+            )
+            return socket.inet_ntop(socket.AF_INET6, packed)
+    except (ValueError, OSError, struct.error):
+        return None
+    return None
+
+
+_PROC_TCP_LISTEN = "0A"
+
+_PROC_NET_TABLES = (
+    ("/proc/net/tcp", True),
+    ("/proc/net/tcp6", True),
+    ("/proc/net/udp", False),
+    ("/proc/net/udp6", False),
+)
+
+
+def _proc_net_local_addrs(port):
+    """Local addresses of every socket bound to `port`, read straight from
+    the kernel's socket tables (/proc/net/tcp{,6} and udp{,6} — world-readable,
+    no root needed). TCP rows are filtered to LISTEN; UDP has no listen state,
+    so any bound row on the port counts. Returns a set of IP strings, or None
+    if no table could be read at all (non-Linux / procfs unavailable)."""
+    found = set()
+    readable = False
+    for path, is_tcp in _PROC_NET_TABLES:
+        try:
+            with open(path) as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        readable = True
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            local, state = parts[1], parts[3]
+            if is_tcp and state != _PROC_TCP_LISTEN:
+                continue
+            try:
+                addr_hex, port_hex = local.rsplit(":", 1)
+                if int(port_hex, 16) != port:
+                    continue
+            except ValueError:
+                continue
+            ip = _proc_hex_to_ip(addr_hex)
+            if ip:
+                found.add(ip)
+    return found if readable else None
 
 
 # Map the authoritative _do_tunnel_check() status onto the coarse "overall"
@@ -3262,11 +3341,19 @@ def api_tunnel():
 #   3. at least one peer handshake within WG_HANDSHAKE_STALE_SEC
 #   4. transmission's bind-address-ipv4 equals the iface's current IPv4
 #   5. packets from the tunnel IPv4 actually egress the tunnel interface
-#      (the policy route is in place — a bind with no route still leaks/fails)
+#      (the policy route is in place — a bind with no route still leaks/fails);
+#      probed against a destination in each half of the v4 space so a stale
+#      split-default (0.0.0.0/1 + 128.0.0.0/1) can't leak one half unseen
 #   6. no IPv6 leak: either the host has no bare global IPv6, or transmission's
 #      bind-address-ipv6 is the tunnel's IPv6 AND it egresses the tunnel
-# A green light asserts all six; any one failing is down (leak/misconfig) or
-# error (can't confirm) — never a false green.
+#   7. the *running* daemon's peer-port sockets are actually bound to the
+#      tunnel IP (kernel socket table) — settings.json only applies at daemon
+#      startup, so the file can name the tunnel IP while the live process
+#      still holds 0.0.0.0 sockets from before the edit
+# A green light asserts all seven; any one failing is down (leak/misconfig) or
+# error (can't confirm) — never a false green. Every probe fails CLOSED: a
+# check that can't run (ip/wg missing, /proc unreadable, RPC down) is error,
+# never a silent pass.
 
 _tunnel_check_cache = {"at": 0.0, "data": None}
 _tunnel_check_lock = threading.Lock()
@@ -3301,6 +3388,8 @@ def _do_tunnel_check():
         "host_bare_ipv6": None,
         "route_egress_dev": None,
         "route_egress_dev6": None,
+        "peer_port": None,
+        "live_bind_addrs": None,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "error": None,
         "cached": False,
@@ -3399,17 +3488,35 @@ def _do_tunnel_check():
 
     # (5) IPv4 routing. Binding to the tunnel IP only confines traffic if
     # packets from it actually egress the tunnel; a missing policy route sends
-    # them out the bare link instead — a leak the bind check can't see.
-    route_dev = _route_egress_dev("1.1.1.1", tunnel_addr)
-    result["route_egress_dev"] = route_dev
-    if route_dev is not None and route_dev != iface:
-        result["status"] = "down"
-        result["reason"] = "route_leak"
-        result["error"] = (
-            f"packets from the tunnel IP {tunnel_addr} egress '{route_dev}', "
-            f"not the tunnel '{iface}' — routing leak (check the policy route)"
-        )
-        return result
+    # them out the bare link instead — a leak the bind check can't see. Probe
+    # one destination in each half of the v4 space: a stale split-default
+    # (0.0.0.0/1 + 128.0.0.0/1, the OpenVPN idiom) routes one half via the
+    # tunnel and leaks the other, so a single probe could land on the good
+    # half and miss it. 203.0.113.1 is TEST-NET-3 (doc-only, never a real VPN
+    # endpoint whose host route legitimately egresses the bare link); `ip
+    # route get` only consults the routing tables — no packet is sent.
+    for probe_dst in ("1.1.1.1", "203.0.113.1"):
+        route_dev, route_err = _route_egress_dev(probe_dst, tunnel_addr)
+        result["route_egress_dev"] = route_dev
+        if route_dev is None:
+            # Fail closed: can't determine the egress → can't confirm
+            # confinement → error, never a silent pass.
+            result["status"] = "error"
+            result["reason"] = "route_unverifiable"
+            result["error"] = (
+                f"could not verify the egress route for {probe_dst} from the "
+                f"tunnel IP {tunnel_addr}: {route_err}"
+            )
+            return result
+        if route_dev != iface:
+            result["status"] = "down"
+            result["reason"] = "route_leak"
+            result["error"] = (
+                f"packets from the tunnel IP {tunnel_addr} to {probe_dst} "
+                f"egress '{route_dev}', not the tunnel '{iface}' — routing "
+                "leak (check the policy route)"
+            )
+            return result
 
     # (6) IPv6. Everything above is IPv4-only; a host with native IPv6 can leak
     # the real v6 address over BitTorrent while v4 looks perfect.
@@ -3436,13 +3543,85 @@ def _do_tunnel_check():
         )
         return result
     if v6_verdict == "unknown":
-        # Bare v6 may be present but we couldn't read the v6 bind or enumerate
-        # addresses — can't confirm v6 is confined, so don't flip green.
+        # Bare v6 may be present but we couldn't read the v6 bind, enumerate
+        # addresses, or verify the v6 egress route — can't confirm v6 is
+        # confined, so don't flip green.
         result["status"] = "error"
         result["reason"] = "ipv6_unverifiable"
         result["error"] = (
             "could not verify IPv6 is confined to the tunnel "
-            "(bind-address-ipv6 unreadable or interface enumeration failed)"
+            "(bind-address-ipv6 unreadable, interface enumeration failed, "
+            f"or v6 egress route unverifiable: {v6_detail.get('route_error6') or 'n/a'})"
+        )
+        return result
+
+    # (7) Live socket state. Everything above trusts what settings.json (or
+    # the RPC) *says* the bind is — but the daemon only applies bind-address
+    # at startup, so the file can name the tunnel IP while the running
+    # process still holds 0.0.0.0 sockets from before the edit (Transmission
+    # 4.x dropped the field from the RPC, making the file our only config
+    # source). The kernel's socket table is the one thing that can't be
+    # stale: check the actual local addresses of the daemon's peer-port
+    # sockets. The peer port itself comes from session-get, which does
+    # reflect the live daemon.
+    try:
+        peer_port = client.get_peer_port()
+    except Exception:
+        peer_port = None
+    result["peer_port"] = peer_port
+    if not peer_port:
+        result["status"] = "error"
+        result["reason"] = "live_bind_unverifiable"
+        result["error"] = (
+            "could not read transmission's peer port over RPC to verify the "
+            "running daemon's live socket bind"
+        )
+        return result
+    live_addrs = _proc_net_local_addrs(peer_port)
+    if live_addrs is None:
+        result["status"] = "error"
+        result["reason"] = "live_bind_unverifiable"
+        result["error"] = (
+            "could not read the kernel socket tables (/proc/net) to verify "
+            "the running daemon's live socket bind"
+        )
+        return result
+    result["live_bind_addrs"] = sorted(live_addrs)
+    if not live_addrs:
+        # Daemon answered RPC but holds no socket on its own peer port —
+        # most likely its startup bind to a since-vanished IP failed. Nothing
+        # is leaking (there's no socket), but nothing is confined either.
+        result["status"] = "error"
+        result["reason"] = "live_bind_unverifiable"
+        result["error"] = (
+            f"no sockets found on transmission's peer port {peer_port} — "
+            "cannot confirm the running daemon's bind (did its startup bind "
+            "fail?)"
+        )
+        return result
+    # Loopback / link-local sockets can't reach the internet, and may belong
+    # to some unrelated local service sharing the port number — ignore them.
+    # Any other v4 socket must sit on the tunnel IP; any other v6 socket only
+    # matters when a bare global v6 exists to leak through (mirroring the
+    # config-level v6 check above).
+    leaky = []
+    for a in sorted(live_addrs):
+        base = a.split("%")[0].lower()
+        if base.startswith("127.") or base == "::1" or base.startswith("fe80"):
+            continue
+        if ":" in base:
+            if result["host_bare_ipv6"] and base != (tunnel_addr6 or "").lower():
+                leaky.append(a)
+        elif a != tunnel_addr:
+            leaky.append(a)
+    if leaky:
+        result["status"] = "down"
+        result["reason"] = "live_bind_mismatch"
+        result["error"] = (
+            f"the running daemon holds peer-port {peer_port} sockets on "
+            f"{', '.join(leaky)} — not the tunnel IP {tunnel_addr}. "
+            "bind-address only applies at startup; restart "
+            "transmission-daemon to pick up settings.json"
         )
         return result
 

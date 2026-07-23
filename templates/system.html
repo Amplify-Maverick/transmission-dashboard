@@ -668,7 +668,8 @@
             }
             // A v6 or routing leak can trip while the v4 bind reads fine —
             // don't show the reassuring "bound" line then; show the leak.
-            const leakReasons = ['ipv6_leak', 'route_leak', 'route_leak_v6', 'ipv6_unverifiable'];
+            const leakReasons = ['ipv6_leak', 'route_leak', 'route_leak_v6', 'ipv6_unverifiable',
+                                 'live_bind_mismatch', 'route_unverifiable', 'live_bind_unverifiable'];
             if (leakReasons.includes(t.reason) && t.error) {
                 bindText = t.error;
             }

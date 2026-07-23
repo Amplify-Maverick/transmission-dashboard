@@ -74,8 +74,16 @@ class TunnelCheckTests(unittest.TestCase):
         # Default: packets from the tunnel IP egress the tunnel interface
         # (routing correct). Leak tests override this. Keeps the "up" cases
         # deterministic and off the real `ip` binary.
-        self.p_route = patch("app._route_egress_dev", return_value=self.iface)
+        self.p_route = patch(
+            "app._route_egress_dev", return_value=(self.iface, None)
+        )
         self.p_route.start()
+        # Default live-socket state: the running daemon's peer-port sockets
+        # sit on the default tunnel IP. Live-bind tests override these.
+        patch("app.client.get_peer_port", return_value=51413).start()
+        patch(
+            "app._proc_net_local_addrs", return_value={"10.99.0.5"}
+        ).start()
         # _disk_target is cached at module level; reset between tests so a
         # cached "/" doesn't leak across cases.
         app._disk_target_cache["at"] = 0.0
@@ -178,6 +186,7 @@ class TunnelCheckTests(unittest.TestCase):
             p.start()
         self._patch_wg_output(5).start()
         self._patch_bind(new_ip).start()
+        patch("app._proc_net_local_addrs", return_value={new_ip}).start()
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "up", msg=r.get("error"))
         self.assertEqual(r["interface_address"], new_ip)
@@ -220,11 +229,44 @@ class TunnelCheckTests(unittest.TestCase):
         self._patch_wg_output(10).start()
         self._patch_bind("10.99.0.5").start()
         # Override setUp's routing patch: egress is eth0, not the tunnel.
-        patch("app._route_egress_dev", return_value="eth0").start()
+        patch("app._route_egress_dev", return_value=("eth0", None)).start()
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "down")
         self.assertEqual(r["reason"], "route_leak")
         self.assertIn("egress", r["error"])
+
+    def test_route_unverifiable_is_error_not_up(self):
+        """`ip route get` can't answer (binary missing, no route, garbage
+        output). The old code treated that None as a pass — a silent false
+        green. It must fail closed to error instead."""
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch(
+            "app._route_egress_dev",
+            return_value=(None, "ip route get unavailable (FileNotFoundError)"),
+        ).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["reason"], "route_unverifiable")
+        self.assertIn("could not verify", r["error"])
+
+    def test_split_default_leak_caught_by_second_probe(self):
+        """A stale split-default (0.0.0.0/1 via tunnel, 128.0.0.0/1 via eth0)
+        routes the first probe (1.1.1.1) through the tunnel but leaks the
+        upper half of the address space. The second probe must catch it."""
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch(
+            "app._route_egress_dev",
+            side_effect=[(self.iface, None), ("eth0", None)],
+        ).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "down")
+        self.assertEqual(r["reason"], "route_leak")
 
     def test_ipv6_leak_when_host_has_bare_v6_and_transmission_not_bound_v6(self):
         """v4 is perfectly bound and routed, but the host has a global IPv6 on
@@ -277,6 +319,106 @@ class TunnelCheckTests(unittest.TestCase):
         r = app._do_tunnel_check()
         self.assertEqual(r["status"], "up", msg=r.get("error"))
         self.assertFalse(r["host_bare_ipv6"])
+
+    # -- live socket-table verification (check 7) --
+
+    def test_live_bind_mismatch_when_daemon_predates_settings_edit(self):
+        """settings.json names the tunnel IP, but the running daemon was
+        started before the edit and still holds 0.0.0.0 sockets — the exact
+        false green the file-based bind check can't see. The kernel socket
+        table must veto the green."""
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch("app._proc_net_local_addrs", return_value={"0.0.0.0"}).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "down")
+        self.assertEqual(r["reason"], "live_bind_mismatch")
+        self.assertIn("restart", r["error"])
+
+    def test_live_bind_ignores_loopback_sockets(self):
+        """An unrelated local service listening on the same port number on
+        loopback can't leak anything and must not trip a false red."""
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch(
+            "app._proc_net_local_addrs",
+            return_value={"10.99.0.5", "127.0.0.1", "::1"},
+        ).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "up", msg=r.get("error"))
+
+    def test_live_bind_wildcard_v6_socket_leaks_when_host_has_bare_v6(self):
+        """Config-level v6 bind is correct, but the live daemon still holds a
+        wildcard [::] socket while a bare global IPv6 exists — a live v6 leak
+        the settings check can't see."""
+        import socket as s
+        tunnel_v6 = "fc00:1111::5"
+        for p in self._patch_addrs_multi({
+            self.iface: [(s.AF_INET, "10.99.0.5"), (s.AF_INET6, tunnel_v6)],
+            "eth0": [(s.AF_INET, "192.168.1.10"), (s.AF_INET6, "2001:db8:abcd::1")],
+        }):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch("app.client.get_session_bind_address_ipv6", return_value=tunnel_v6).start()
+        patch(
+            "app._proc_net_local_addrs", return_value={"10.99.0.5", "::"}
+        ).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "down")
+        self.assertEqual(r["reason"], "live_bind_mismatch")
+
+    def test_live_bind_unverifiable_when_proc_unreadable(self):
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch("app._proc_net_local_addrs", return_value=None).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["reason"], "live_bind_unverifiable")
+
+    def test_live_bind_unverifiable_when_peer_port_unreadable(self):
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch(
+            "app.client.get_peer_port", side_effect=Exception("rpc down")
+        ).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["reason"], "live_bind_unverifiable")
+
+    def test_no_sockets_on_peer_port_is_error(self):
+        """Daemon answers RPC but holds no peer-port socket (startup bind to a
+        vanished IP failed). Nothing leaks, but nothing is confined — amber,
+        not green."""
+        for p in self._patch_iface(ipv4="10.99.0.5"):
+            p.start()
+        self._patch_wg_output(10).start()
+        self._patch_bind("10.99.0.5").start()
+        patch("app._proc_net_local_addrs", return_value=set()).start()
+        r = app._do_tunnel_check()
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["reason"], "live_bind_unverifiable")
+
+    def test_proc_hex_to_ip_decoding(self):
+        """/proc/net addresses are little-endian hex — easy to get backwards."""
+        self.assertEqual(app._proc_hex_to_ip("0100007F"), "127.0.0.1")
+        self.assertEqual(app._proc_hex_to_ip("00000000"), "0.0.0.0")
+        self.assertEqual(app._proc_hex_to_ip("0500630A"), "10.99.0.5")
+        self.assertEqual(
+            app._proc_hex_to_ip("00000000000000000000000001000000"), "::1"
+        )
+        self.assertEqual(
+            app._proc_hex_to_ip("00000000000000000000000000000000"), "::"
+        )
+        self.assertIsNone(app._proc_hex_to_ip("nonsense"))
 
     def test_wg_binary_missing_is_error_not_down(self):
         patch.stopall()  # drop the default _wg_show_dump fake

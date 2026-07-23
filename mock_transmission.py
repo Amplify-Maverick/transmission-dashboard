@@ -321,6 +321,9 @@ class MockTransmissionClient:
     def get_session_bind_address_ipv6(self):
         return _MOCK_SESSION.get("bind-address-ipv6")
 
+    def get_peer_port(self):
+        return 51413
+
     def set_download_dir(self, path):
         _MOCK_SESSION["download-dir"] = path
         return {"result": "success", "arguments": {}}

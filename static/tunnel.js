@@ -66,6 +66,7 @@
         let downLabel = 'Tunnel down';
         if (data.reason === 'ipv6_leak') downLabel = 'IPv6 leak';
         else if (data.reason === 'route_leak' || data.reason === 'route_leak_v6') downLabel = 'Route leak';
+        else if (data.reason === 'live_bind_mismatch') downLabel = 'Bind leak';
         label.textContent = status === 'up' ? 'Tunnel'
                           : status === 'down' ? downLabel
                           : 'Tunnel ?';
@@ -107,6 +108,9 @@
             lines.push(`Transmission bind (v6): ${data.transmission_bind_address6 || 'unset'}`
                 + (data.reason === 'ipv6_leak' ? ' (host has bare IPv6 — leak)' : ''));
         }
+        if (data.live_bind_addrs && data.live_bind_addrs.length) {
+            lines.push(`Live sockets (:${data.peer_port}): ${data.live_bind_addrs.join(', ')}`);
+        }
         if (data.route_egress_dev && data.route_egress_dev !== data.interface) {
             lines.push(`Egress dev: ${data.route_egress_dev} (not the tunnel)`);
         }
@@ -130,7 +134,13 @@
         pollBusy = true;
         try {
             const res = await fetch('/api/tunnel-status', { cache: 'no-store' });
-            if (res.status === 401) return;
+            if (res.status === 401) {
+                // Session expired — the previous (possibly green) state is now
+                // unverifiable. Fail closed to "?" rather than freezing a
+                // stale all-clear on screen.
+                apply({ ok: false, error: 'session expired — sign in again' });
+                return;
+            }
             if (!res.ok) {
                 apply({ ok: false, error: 'HTTP ' + res.status });
                 return;

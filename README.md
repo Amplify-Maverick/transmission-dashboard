@@ -384,18 +384,38 @@ these hold, each read from live state (nothing hardcoded):
 2. a peer handshake within `WG_HANDSHAKE_STALE_SEC`;
 3. Transmission's `bind-address-ipv4` equals the interface's current IPv4;
 4. **packets from that tunnel IPv4 actually egress the tunnel interface** —
-   verified with `ip route get`, so a bind with a missing/broken policy route
-   (which would leak or black-hole) can't show green;
+   verified with `ip route get` against a destination in *each half* of the
+   IPv4 space, so neither a missing policy route nor a stale split-default
+   (`0.0.0.0/1` + `128.0.0.0/1`) leaking one half can show green;
 5. **no IPv6 leak** — either the host has no globally-routable IPv6 on a bare
    interface, or Transmission's `bind-address-ipv6` is the tunnel's IPv6 *and*
-   that traffic egresses the tunnel too.
+   that traffic egresses the tunnel too;
+6. **the running daemon's sockets agree** — the kernel's socket table
+   (`/proc/net`) shows the daemon's peer-port sockets actually bound to the
+   tunnel IP. Transmission only applies `bind-address-*` at startup, so
+   `settings.json` can name the tunnel IP while the live process still holds
+   `0.0.0.0` sockets from before the edit; only kernel state can't be stale.
 
-Checks 4 and 5 close the two leaks a naïve bind check misses: a correct
-`bind-address-ipv4` with no matching route still leaks, and an IPv4-only check
-is blind to BitTorrent leaking your real address over IPv6. A leak shows a red
-**"IPv6 leak"** / **"Route leak"** label (not just "down"), and if the check
-genuinely can't confirm IPv6 is confined it shows amber rather than green.
-Everything is derived live, so it keeps working after the tunnel IP changes.
+Checks 4–6 close the leaks a naïve bind check misses: a correct
+`bind-address-ipv4` with no matching route still leaks, an IPv4-only check
+is blind to BitTorrent leaking your real address over IPv6, and a
+settings-file check is blind to a daemon that predates the file. A leak shows
+a red **"IPv6 leak"** / **"Route leak"** / **"Bind leak"** label (not just
+"down"). Every probe fails *closed*: if a check can't run at all (`ip` or
+`wg` missing, `/proc` or the RPC unreadable) the indicator shows amber
+"Tunnel ?" — never a silent pass. Everything is derived live, so it keeps
+working after the tunnel IP changes.
+
+The live-socket check assumes transmission-daemon runs on the same host and
+network namespace as the dashboard (as in the systemd setup below). A daemon
+in a container/netns shows amber — its sockets aren't visible in the
+dashboard's `/proc/net`.
+
+Known residual limits (inherent to a poller): a leak that appears between
+probes can be shown green for up to `TUNNEL_CHECK_CACHE_TTL` + one poll
+interval (~45 s by default), and tracker DNS lookups are resolved by the
+system resolver, which the bind can't confine — use a VPN-provided DNS if
+that metadata matters.
 
 Two optional knobs tune the checks (both commented in `.env.example`):
 `WG_HANDSHAKE_STALE_SEC` (default 180 — how old a handshake may be before the
