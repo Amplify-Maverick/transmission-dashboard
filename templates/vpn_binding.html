@@ -22,6 +22,11 @@
                 <span class="tunnel-dot" data-state="unknown"></span>
                 <span class="tunnel-label">Tunnel ?</span>
             </span>
+            <a id="tracker-test-indicator" class="tunnel" data-state="unknown"
+               href="{{ url_for('system') }}" hidden title="Tracker IP test">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Test ?</span>
+            </a>
             <div class="live">
                 <span class="live-dot" data-state="ok"></span>
                 <span class="live-label">Live</span>
@@ -386,6 +391,7 @@ sudo iptables -C OUTPUT -m mark --mark 0xca6c -j ACCEPT &amp;&amp; echo present 
     </div>
 
     <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='tracker-test.js') }}"></script>
     <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
 </body>
 </html>
