@@ -31,7 +31,7 @@ METRICS_SAMPLE_INTERVAL = float(os.getenv("METRICS_SAMPLE_INTERVAL", "30"))
 # visible before traffic leaks out the bare ISP link. TUNNEL_IFACE is the
 # canonical env var; WG_INTERFACE is accepted for back-compat. No default —
 # the interface name is site-specific, so it must come from .env (leaving it
-# unset simply hides the tunnel indicator).
+# unset shows a muted "Tunnel off" chip and runs no live checks).
 TUNNEL_IFACE = os.getenv("TUNNEL_IFACE") or os.getenv("WG_INTERFACE") or ""
 # A peer is considered stale if the kernel hasn't seen a handshake in this
 # many seconds. WireGuard rekeys roughly every 2 minutes when traffic flows;

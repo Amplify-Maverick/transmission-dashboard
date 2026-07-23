@@ -178,9 +178,10 @@ class TunnelCheckTests(unittest.TestCase):
         self.assertEqual(r["interface_address"], new_ip)
 
     def test_empty_iface_is_disabled_not_down(self):
-        """An unset TUNNEL_IFACE means the operator didn't opt into the tunnel
-        indicator. It must report 'disabled' (UI hides it), never a false 'down'
-        — and must not probe wg/psutil with an empty interface name."""
+        """An unset TUNNEL_IFACE means the operator didn't opt into live tunnel
+        monitoring. It must report 'disabled' (the UI renders a muted "Tunnel
+        off" chip), never a false 'down' — and must not probe wg/psutil with an
+        empty interface name."""
         with patch.object(config, "TUNNEL_IFACE", ""), \
              patch("app._wg_show_dump") as m_dump, \
              patch("app.psutil.net_if_stats") as m_stats:

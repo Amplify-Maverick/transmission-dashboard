@@ -26,11 +26,21 @@
     }
 
     function apply(data) {
-        // No interface configured server-side → the indicator is opt-in, so
-        // hide it entirely rather than showing a state the operator never asked
-        // for. (Polling continues cheaply; the server short-circuits.)
+        // No interface configured server-side. Rather than hiding the
+        // indicator (which made the whole tunnel feature invisible on a fresh
+        // install — you couldn't tell it existed), show a neutral, muted
+        // "Tunnel off" chip so the unconfigured state is explicit and the
+        // feature is discoverable. It's deliberately NOT a red "down" — nothing
+        // is wrong, monitoring is just off. Config is static, so render it once
+        // and stop polling.
         if (data && data.status === 'disabled') {
-            indicator.style.display = 'none';
+            indicator.style.display = '';
+            indicator.dataset.state = 'off';
+            dot.dataset.state = 'off';
+            label.textContent = 'Tunnel off';
+            indicator.title = 'VPN tunnel monitoring is off.\n'
+                + 'Set TUNNEL_IFACE in .env to your WireGuard interface name '
+                + 'to watch tunnel health here.';
             stop();  // config is static; no point polling a disabled indicator
             return;
         }

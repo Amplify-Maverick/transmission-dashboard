@@ -220,6 +220,56 @@ transmission-dashboard` (the `--now` also stops the running instance).
 
 ---
 
+## Access over Tailscale
+
+The dashboard binds to `127.0.0.1:5000` — localhost only, by design. The
+cleanest way to reach it from your other devices is [Tailscale](https://tailscale.com):
+its `serve` command reverse-proxies the local port across your tailnet with
+automatic HTTPS, and it's reachable **only** by devices signed into your
+tailnet (never the public internet). You leave the gunicorn bind on localhost —
+that stays the security boundary; Tailscale sits in front of it.
+
+**One-time tailnet setup:**
+
+1. Install Tailscale on the server and bring it up: `sudo tailscale up`.
+2. In the [admin console](https://login.tailscale.com/admin/dns) → **DNS**,
+   enable **MagicDNS** and **HTTPS Certificates** — `tailscale serve` needs
+   these to issue the TLS cert.
+
+**Then, on the server:**
+
+```bash
+tailscale serve --bg 5000
+```
+
+That forwards `https://<host>.<tailnet>.ts.net` (port 443) →
+`http://127.0.0.1:5000`. `--bg` runs it in the background persistently — the
+mapping lives in `tailscaled` state and **survives reboots on its own**, so it
+needs no systemd unit of its own.
+
+Check it and find the URL:
+
+```bash
+tailscale serve status      # shows the mapping and the public tailnet URL
+tailscale status | head -1  # this machine's tailnet name
+```
+
+Open `https://<host>.<tailnet>.ts.net` from any device on the tailnet. The
+dashboard's own login (`DASHBOARD_USER` / `DASHBOARD_PASS`) still applies on
+top. To remove the mapping later: `tailscale serve reset`.
+
+> **Don't use `tailscale funnel`** for this — funnel exposes the app to the
+> *public* internet, which you almost certainly don't want for a personal
+> torrent dashboard. `serve` keeps it tailnet-only.
+
+If you'd rather not enable HTTPS certs, you can instead bind gunicorn to all
+interfaces (change `--bind 127.0.0.1:5000` to `--bind 0.0.0.0:5000` in the
+systemd unit) and reach it at `http://<host>:5000` — but that's plaintext HTTP
+and also listens on every other interface the box has (LAN included), so it's a
+wider exposure. Prefer `tailscale serve`.
+
+---
+
 ## Updating
 
 When new changes are pushed to the repo, an **"N updates" badge** appears in
@@ -315,10 +365,12 @@ TUNNEL_IFACE=mullvad
 
 Behavior:
 
-- **Set to a valid interface** → the topbar shows the live tunnel indicator.
-- **Left blank** (the default) → the indicator is hidden entirely and no
-  tunnel checks run. Use this if you don't route Transmission through a VPN, or
-  don't want the indicator.
+- **Set to a valid interface** → the topbar shows the live tunnel indicator
+  (green when healthy, red when down).
+- **Left blank** (the default) → the topbar shows a neutral, muted
+  **"Tunnel off"** chip and runs no live checks. It's just a hint that the
+  feature exists and isn't set up — nothing is wrong and nothing leaks. Set
+  `TUNNEL_IFACE` to turn it into a live health check.
 
 The tunnel's IP is **not** configured here — it's read live off the interface
 on every check, so it keeps working after your VPN hands you a new address.
