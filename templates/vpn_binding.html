@@ -51,6 +51,12 @@
                     <li>Policy routing (table 200) makes traffic sourced from the tunnel IPs actually route through
                         the tunnel — <strong>required</strong>, not optional; binding alone does not work without it</li>
                     <li>Transmission binds to the tunnel IPs (both IPv4 and IPv6)</li>
+                    <li>UID-based policy routing forces <em>all</em> of the <code>debian-transmission</code> user's
+                        traffic through the tunnel — not only the packets Transmission source-binds — so tracker
+                        announces and other unbound connections can't slip out the real link</li>
+                    <li>A WireGuard <code>FwMark</code> tags the tunnel's own encrypted packets so the kill switch
+                        lets them out to the relay; without it the kill switch drops them and <em>all</em> of the
+                        daemon's outbound traffic silently fails</li>
                     <li>iptables/ip6tables kill switch restricts the <code>debian-transmission</code> user to
                         loopback + tunnel only</li>
                     <li>RPC locked to localhost with authentication</li>
@@ -87,7 +93,7 @@ sudo apt install wireguard wireguard-tools transmission-daemon -y</code></pre>
 sudo chmod 600 /etc/wireguard/mullvad.conf
 sudo chown root:root /etc/wireguard/mullvad.conf</code></pre>
 
-                <h2>Step 4: Note your tunnel IPs</h2>
+                <h2>Step 4: Note your tunnel IPs and the daemon's UID</h2>
                 <pre><code>sudo cat /etc/wireguard/mullvad.conf</code></pre>
                 <p>Find the <code>Address</code> line. It contains your IPv4 and IPv6 tunnel addresses, e.g.:</p>
                 <pre><code>Address = 10.75.112.58/32,fc00:bbbb:bbbb:bb01::c:7039/128</code></pre>
@@ -96,6 +102,10 @@ sudo chown root:root /etc/wireguard/mullvad.conf</code></pre>
                     <code>&lt;TUNNEL_IPV4&gt;</code> or <code>&lt;TUNNEL_IPV6&gt;</code> below, substitute your
                     actual values (without the <code>/32</code> or <code>/128</code> suffix).
                 </p>
+                <p>Also note the numeric UID of the daemon's user — the policy routing in Step 5 needs it:</p>
+                <pre><code>id -u debian-transmission</code></pre>
+                <p>Wherever you see <code>&lt;TRANSMISSION_UID&gt;</code> below, substitute this number (commonly
+                    something like <code>105</code>, but it varies by system).</p>
 
                 <h2>Step 5: Edit the config — add split-tunnel routing</h2>
                 <pre><code>sudo nano /etc/wireguard/mullvad.conf</code></pre>
@@ -108,8 +118,9 @@ Address = &lt;TUNNEL_IPV4&gt;/32,&lt;TUNNEL_IPV6&gt;/128
 Table = off
 MTU = 1380
 DNS = 10.64.0.1
-PostUp = ip route add default dev mullvad src &lt;TUNNEL_IPV4&gt; scope link table 200; ip rule add from &lt;TUNNEL_IPV4&gt; table 200; ip -6 route add default dev mullvad table 200; ip -6 rule add from &lt;TUNNEL_IPV6&gt; table 200
-PostDown = ip rule delete from &lt;TUNNEL_IPV4&gt; table 200; ip route delete default dev mullvad table 200 2&gt;/dev/null || true; ip -6 rule delete from &lt;TUNNEL_IPV6&gt; table 200; ip -6 route delete default dev mullvad table 200 2&gt;/dev/null || true
+FwMark = 0xca6c
+PostUp = ip route add default dev mullvad src &lt;TUNNEL_IPV4&gt; scope link table 200; ip rule add from &lt;TUNNEL_IPV4&gt; table 200; ip -6 route add default dev mullvad table 200; ip -6 rule add from &lt;TUNNEL_IPV6&gt; table 200; ip rule add fwmark 0xca6c lookup main priority 5255; ip rule add uidrange &lt;TRANSMISSION_UID&gt;-&lt;TRANSMISSION_UID&gt; lookup 200 priority 5260; ip -6 rule add uidrange &lt;TRANSMISSION_UID&gt;-&lt;TRANSMISSION_UID&gt; lookup 200 priority 5260
+PostDown = ip rule delete from &lt;TUNNEL_IPV4&gt; table 200; ip route delete default dev mullvad table 200 2&gt;/dev/null || true; ip -6 rule delete from &lt;TUNNEL_IPV6&gt; table 200; ip -6 route delete default dev mullvad table 200 2&gt;/dev/null || true; ip rule del fwmark 0xca6c lookup main priority 5255 2&gt;/dev/null || true; ip rule del uidrange &lt;TRANSMISSION_UID&gt;-&lt;TRANSMISSION_UID&gt; lookup 200 priority 5260 2&gt;/dev/null || true; ip -6 rule del uidrange &lt;TRANSMISSION_UID&gt;-&lt;TRANSMISSION_UID&gt; lookup 200 priority 5260 2&gt;/dev/null || true
 
 [Peer]
 PublicKey = &lt;unchanged&gt;
@@ -132,6 +143,23 @@ Endpoint = &lt;unchanged&gt;</code></pre>
                         <code>wg-quick up</code> fails with <code>resolvconf: command not found</code>, either
                         install resolvconf (<code>sudo apt install resolvconf</code>) or simply delete this DNS
                         line — it is not required for Transmission to work.</li>
+                    <li><strong><code>FwMark = 0xca6c</code></strong> — tags WireGuard's own encrypted packets with a
+                        firewall mark. This is what lets those packets past the kill switch in Step 11: the encrypted
+                        ciphertext leaves via the <em>physical</em> NIC to reach the Mullvad relay (not via
+                        <code>mullvad</code>), so the kill switch would otherwise drop it. <code>0xca6c</code> is
+                        WireGuard's conventional mark; any unused value works as long as Step 11's ACCEPT rule matches
+                        it. Verify after <code>wg-quick up</code> with <code>sudo wg show mullvad fwmark</code> — it
+                        must print <code>0xca6c</code>, not <code>off</code>.</li>
+                    <li><strong><code>fwmark 0xca6c lookup main priority 5255</code></strong> — routes those marked
+                        (encrypted) packets out via the main table (your real NIC) so they reach the relay, instead
+                        of being caught by the UID rule below and looped back into the tunnel.</li>
+                    <li><strong><code>uidrange &lt;TRANSMISSION_UID&gt; lookup 200</code> (IPv4 and IPv6)</strong> —
+                        routes <em>all</em> of the daemon's traffic through the tunnel, not only what it source-binds.
+                        The <code>from &lt;TUNNEL_IPV4&gt;</code> rule above only catches packets Transmission binds to
+                        the tunnel IP — it binds its <em>peer</em> sockets there, but not its tracker/HTTP announces
+                        (those go out through libcurl unbound). Without this rule, tracker announces route to the real
+                        link and the kill switch drops them, so Transmission can never reach a tracker. Priority 5260
+                        keeps it just after the fwmark escape rule (5255) so encrypted packets escape first.</li>
                 </ul>
 
                 <h2>Step 6: Bring up the tunnel and verify</h2>
@@ -227,13 +255,24 @@ source ~/.bashrc</code></pre>
                     loopback or the tunnel.</p>
                 <pre><code>sudo iptables  -A OUTPUT -m owner --uid-owner debian-transmission -o lo      -j ACCEPT
 sudo iptables  -A OUTPUT -m owner --uid-owner debian-transmission -o mullvad -j ACCEPT
+sudo iptables  -A OUTPUT -m mark --mark 0xca6c                              -j ACCEPT
 sudo iptables  -A OUTPUT -m owner --uid-owner debian-transmission            -j DROP
 
 sudo ip6tables -A OUTPUT -m owner --uid-owner debian-transmission -o lo      -j ACCEPT
 sudo ip6tables -A OUTPUT -m owner --uid-owner debian-transmission -o mullvad -j ACCEPT
 sudo ip6tables -A OUTPUT -m owner --uid-owner debian-transmission            -j DROP</code></pre>
-                <p>Rule order matters (evaluated top-down): allow loopback, allow tunnel, drop everything else —
-                    for that UID only. All other users/services are unaffected.</p>
+                <p>Rule order matters (evaluated top-down): allow loopback, allow the tunnel, allow the tunnel's own
+                    encrypted packets, drop everything else — for that UID only. All other users/services are
+                    unaffected.</p>
+                <p><strong>The <code>--mark 0xca6c</code> ACCEPT rule is essential and easy to miss.</strong>
+                    WireGuard encrypts the daemon's packets and sends the ciphertext out your <em>physical</em> NIC to
+                    reach the Mullvad relay. That ciphertext belongs to the <code>debian-transmission</code> user but
+                    does <em>not</em> leave via <code>mullvad</code>, so without this rule the <code>DROP</code> below
+                    eats it — and then <em>every</em> outbound connection the daemon makes silently fails (trackers
+                    report "Could not connect", and only inbound peers ever work). The <code>FwMark</code> from Step 5
+                    is what tags those packets so this rule can match them. It's IPv4-only on purpose: the relay
+                    endpoint is IPv4, so all encrypted packets are IPv4 regardless of whether the inner traffic was
+                    v4 or v6.</p>
                 <p>The IPv6 rules are NOT optional: Transmission binds an IPv6 listener, and without ip6tables
                     rules, IPv6 traffic has no kill switch.</p>
                 <p>Verify:</p>
@@ -291,22 +330,41 @@ sudo wg-quick up mullvad                               # restore</code></pre>
 
                 <h3>Quick health check (run any time)</h3>
                 <pre><code>sudo wg show                                          # recent handshake?
+sudo wg show mullvad fwmark                            # 0xca6c (not "off")?
 curl --interface &lt;TUNNEL_IPV4&gt; https://am.i.mullvad.net/json   # mullvad_exit_ip: true?
 sudo ss -tlnp | grep transmission                     # bound to tunnel IPs?
 ip rule show &amp;&amp; ip route show table 200               # policy routing intact?</code></pre>
 
+                <h3>Troubleshooting: every tracker shows "Could not connect"</h3>
+                <p>If DHT finds peers but <em>every</em> tracker announce fails with "Could not connect", the daemon's
+                    outbound packets are being dropped by its own kill switch — specifically WireGuard's encrypted
+                    packets, which must leave via the real NIC. Check that all three pieces from Steps 5 and 11 are
+                    present:</p>
+                <pre><code>sudo wg show mullvad fwmark                              # expect: 0xca6c (not "off")
+ip rule show | grep -E 'uidrange|fwmark 0xca6c'         # expect the 5255 + 5260 rules
+sudo iptables -C OUTPUT -m mark --mark 0xca6c -j ACCEPT &amp;&amp; echo present   # the ACCEPT must exist</code></pre>
+                <p>Then confirm the daemon's own user can reach the internet through the tunnel:</p>
+                <pre><code>sudo -u debian-transmission curl -sS --max-time 15 https://am.i.mullvad.net/ip</code></pre>
+                <p>This must print your Mullvad exit IP. If it times out, one of the three pieces is missing. To see
+                    exactly where a packet dies, run <code>sudo tcpdump -nni any host &lt;relay-ip&gt;</code> (relay
+                    from <code>sudo wg show mullvad endpoints</code>) while repeating the curl — if the encrypted UDP
+                    never leaves for the relay, the fwmark/ACCEPT chain is the problem; if it leaves but nothing
+                    returns, look at the routing/bind.</p>
+
                 <h3>Known limitations</h3>
                 <ul>
-                    <li><strong>No inbound port forwarding</strong> — Mullvad discontinued it. Seeding works via
-                        DHT/PEX-discovered and outbound-initiated connections only.</li>
-                    <li><strong>Some UDP trackers may be unreachable through the tunnel</strong> depending on your
-                        network path, even when HTTPS trackers and DHT work perfectly. DHT/PEX peer discovery is
-                        unaffected and is sufficient for well-seeded public torrents.</li>
+                    <li><strong>No inbound port forwarding</strong> — Mullvad discontinued it. Inbound peers can't
+                        reach you; peering relies on outbound-initiated connections, DHT, and PEX.</li>
                     <li><strong>Tracker errors on individual trackers are normal</strong> — public torrents often
-                        list many trackers, several of which are dead or unreliable at any given time. As long as
-                        the torrent finds peers (via any tracker, DHT, or PEX), individual tracker errors are
-                        cosmetic.</li>
+                        list many trackers, several of which are dead or unreliable at any given time. As long as the
+                        torrent finds peers (via any working tracker, DHT, or PEX), a few individual tracker errors
+                        are cosmetic.</li>
                 </ul>
+                <p><strong>But if <em>every</em> tracker fails with "Could not connect"</strong> — not just a few —
+                    that is not a limitation, it's the fwmark/UID-routing setup from Steps 5 and 11 missing or wrong.
+                    See the troubleshooting entry above. (Earlier versions of this guide omitted the fwmark step and
+                    wrongly treated blanket tracker failure as normal; it isn't — the daemon's outbound was being
+                    dropped by its own kill switch.)</p>
             </article>
         </div>
     </main>
