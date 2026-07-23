@@ -9,6 +9,7 @@ dashboard.db-shm
 
 # Runtime state files (auto-create on first run / via the Settings UI)
 media_config.json
+app_config.json
 copy_state.json
 scan_state.json
 

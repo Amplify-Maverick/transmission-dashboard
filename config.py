@@ -70,9 +70,16 @@ MULLVAD_ACCOUNT = os.getenv("MULLVAD_ACCOUNT")
 # upstream the topbar shows a badge (see static/updates.js). Both settings
 # are optional; the check degrades to no badge on any error.
 UPDATE_CHECK_ENABLED = os.getenv("UPDATE_CHECK_ENABLED", "true").lower() == "true"
-# How long an update-check result stays cached before another `git fetch`
-# runs. Defaults to 15 minutes so the network hit is rare.
+# Default interval between `git fetch` checks, in seconds. Doubles as the
+# result cache TTL. Defaults to 15 minutes so the network hit is rare. This
+# is only the default — Settings persists a per-install override in
+# app_config.json (see _update_check_settings in app.py).
 UPDATE_CHECK_CACHE_TTL = float(os.getenv("UPDATE_CHECK_CACHE_TTL", "900"))
+# Default check mode. "visible" only checks while a browser tab is open and
+# focused (the poll pauses when hidden); "always" runs a server-side
+# scheduler that keeps checking regardless of any browser. Overridable at
+# runtime in Settings.
+UPDATE_CHECK_MODE = os.getenv("UPDATE_CHECK_MODE", "visible").strip().lower()
 
 
 # ---------- Flask session secret ----------

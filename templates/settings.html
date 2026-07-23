@@ -241,6 +241,56 @@
                 </div>
             </section>
 
+            <section class="settings-section">
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">Update checks</h2>
+                    <p class="settings-section-hint">
+                        Controls the topbar badge that appears when this checkout is behind its
+                        git upstream. The check runs a <code>git fetch</code>; it never applies updates
+                        (run <code>./update.sh</code> on the server for that).
+                    </p>
+                </header>
+
+                <div class="form-error" id="update-check-error" hidden></div>
+                <div class="form-info" id="update-check-disabled" hidden>
+                    Update checks are disabled on this server (<code>UPDATE_CHECK_ENABLED=false</code>).
+                    These settings are saved but have no effect until it's re-enabled.
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="update-mode-select">When to check</label>
+                    <select id="update-mode-select">
+                        <option value="visible">Only while a browser tab is open</option>
+                        <option value="always">Always, in the background</option>
+                    </select>
+                    <p class="field-hint">
+                        <strong>Only while open</strong> checks solely when someone has the dashboard
+                        open and focused — zero background activity otherwise.
+                        <strong>Always</strong> runs a server-side scheduler that keeps checking on the
+                        interval below even with no browser connected.
+                    </p>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="update-interval-input">Check interval</label>
+                    <div class="settings-inline-field">
+                        <input type="number" id="update-interval-input" min="1" step="1" placeholder="15">
+                        <select id="update-interval-unit">
+                            <option value="minutes">minutes</option>
+                            <option value="seconds">seconds</option>
+                        </select>
+                    </div>
+                    <p class="field-hint" id="update-interval-hint">
+                        How often at most a <code>git fetch</code> runs. Shorter means faster notice of
+                        new commits but more network traffic.
+                    </p>
+                </div>
+
+                <div class="settings-actions">
+                    <button type="button" class="btn btn-primary" id="update-check-save-btn">Save</button>
+                </div>
+            </section>
+
             <a href="{{ url_for('vpn_binding_guide') }}" class="settings-guide-link">
                 <span class="settings-guide-link-body">
                     <span class="settings-guide-link-title">Binding transmission-daemon to a Mullvad WireGuard tunnel</span>
@@ -939,6 +989,109 @@
         });
 
         loadSettings();
+
+        // ----- update checks -----
+
+        const updateModeEl = document.getElementById('update-mode-select');
+        const updateIntervalEl = document.getElementById('update-interval-input');
+        const updateUnitEl = document.getElementById('update-interval-unit');
+        const updateSaveBtn = document.getElementById('update-check-save-btn');
+        const updateErrorEl = document.getElementById('update-check-error');
+        const updateDisabledEl = document.getElementById('update-check-disabled');
+        const updateHintEl = document.getElementById('update-interval-hint');
+        let updateMinSeconds = 30;
+        let updateMaxSeconds = 86400;
+
+        function showUpdateError(msg) {
+            updateErrorEl.textContent = msg;
+            updateErrorEl.hidden = false;
+        }
+        function clearUpdateError() {
+            updateErrorEl.hidden = true;
+            updateErrorEl.textContent = '';
+        }
+
+        // Seconds -> a friendly {value, unit}. Whole minutes show as minutes;
+        // anything with a sub-minute remainder stays in seconds so nothing is
+        // silently rounded.
+        function secondsToFriendly(secs) {
+            if (secs > 0 && secs % 60 === 0) {
+                return { value: secs / 60, unit: 'minutes' };
+            }
+            return { value: secs, unit: 'seconds' };
+        }
+
+        function currentIntervalSeconds() {
+            const n = parseInt(updateIntervalEl.value, 10);
+            if (!Number.isFinite(n) || n < 1) return null;
+            return updateUnitEl.value === 'minutes' ? n * 60 : n;
+        }
+
+        async function loadUpdateCheckConfig() {
+            try {
+                const res = await fetch('/api/update-check/config');
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                updateModeEl.value = data.mode === 'always' ? 'always' : 'visible';
+                if (Number.isFinite(data.min_interval_seconds)) updateMinSeconds = data.min_interval_seconds;
+                if (Number.isFinite(data.max_interval_seconds)) updateMaxSeconds = data.max_interval_seconds;
+                const friendly = secondsToFriendly(data.interval_seconds || 900);
+                updateIntervalEl.value = friendly.value;
+                updateUnitEl.value = friendly.unit;
+                updateDisabledEl.hidden = data.enabled !== false;
+            } catch (err) {
+                showUpdateError('Failed to load update-check settings: ' + err.message);
+            }
+        }
+
+        async function saveUpdateCheckConfig() {
+            clearUpdateError();
+            const seconds = currentIntervalSeconds();
+            if (seconds === null) {
+                showUpdateError('Check interval must be a whole number of 1 or more.');
+                return;
+            }
+            if (seconds < updateMinSeconds || seconds > updateMaxSeconds) {
+                showUpdateError(
+                    `Interval must be between ${secondsToFriendly(updateMinSeconds).value} `
+                    + `${secondsToFriendly(updateMinSeconds).unit} and `
+                    + `${secondsToFriendly(updateMaxSeconds).value} `
+                    + `${secondsToFriendly(updateMaxSeconds).unit}.`);
+                return;
+            }
+            updateSaveBtn.disabled = true;
+            const prev = updateSaveBtn.textContent;
+            updateSaveBtn.textContent = 'Saving…';
+            try {
+                const res = await fetch('/api/update-check/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        mode: updateModeEl.value,
+                        interval_seconds: seconds,
+                    }),
+                });
+                if (res.status === 401) { unauthorizedRedirect(); return; }
+                let data = null;
+                try { data = await res.json(); } catch (_) {}
+                if (!res.ok || (data && data.ok === false)) {
+                    throw new Error((data && data.error) || ('HTTP ' + res.status));
+                }
+                toast('Update-check settings saved', 'success');
+            } catch (err) {
+                showUpdateError('Save failed: ' + err.message);
+            } finally {
+                updateSaveBtn.disabled = false;
+                updateSaveBtn.textContent = prev;
+            }
+        }
+
+        updateSaveBtn.addEventListener('click', saveUpdateCheckConfig);
+        [updateModeEl, updateIntervalEl, updateUnitEl].forEach(el =>
+            el.addEventListener('input', clearUpdateError));
+
+        loadUpdateCheckConfig();
     </script>
     <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
 </body>

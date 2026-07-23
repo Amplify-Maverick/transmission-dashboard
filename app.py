@@ -147,6 +147,7 @@ def _atomic_write_json(path, data):
 # ---------- copy-to-media-server state ----------
 
 MEDIA_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media_config.json")
+APP_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_config.json")
 COPY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copy_state.json")
 COPIED_LABEL = "Copied"
 _copy_state_lock = threading.Lock()
@@ -268,6 +269,25 @@ def _read_media_config():
 
 def _write_media_config(cfg):
     with open(MEDIA_CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+# General dashboard settings that aren't Transmission's and aren't media-copy
+# specific (currently just the update-check preferences). Kept in its own file
+# so saving one group never has to round-trip and rewrite the other.
+def _read_app_config():
+    if not os.path.exists(APP_CONFIG_FILE):
+        return {}
+    try:
+        with open(APP_CONFIG_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_app_config(cfg):
+    with open(APP_CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
 
@@ -3762,6 +3782,38 @@ _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _update_check_cache = {"at": 0.0, "data": None}
 _update_check_lock = threading.Lock()
 
+# Bounds on the user-set fetch interval. The floor protects the git remote
+# from being hammered; the ceiling keeps a fat-fingered value from parking the
+# check for months.
+MIN_UPDATE_CHECK_INTERVAL = 30          # 30 seconds
+MAX_UPDATE_CHECK_INTERVAL = 24 * 60 * 60  # 1 day
+
+
+def _update_check_settings():
+    """Effective update-check settings: the env-var defaults overlaid with any
+    override persisted from Settings (app_config.json['update_check']).
+
+    Returns {"mode": "visible"|"always", "interval_seconds": int}. Always
+    returns sane, in-bounds values — a hand-corrupted config can't disable or
+    over-drive the check.
+    """
+    stored = _read_app_config().get("update_check")
+    if not isinstance(stored, dict):
+        stored = {}
+
+    interval = stored.get("interval_seconds", config.UPDATE_CHECK_CACHE_TTL)
+    try:
+        interval = int(float(interval))
+    except (TypeError, ValueError):
+        interval = int(config.UPDATE_CHECK_CACHE_TTL)
+    interval = max(MIN_UPDATE_CHECK_INTERVAL,
+                   min(MAX_UPDATE_CHECK_INTERVAL, interval))
+
+    mode = str(stored.get("mode", config.UPDATE_CHECK_MODE)).strip().lower()
+    if mode not in ("visible", "always"):
+        mode = "visible"
+    return {"mode": mode, "interval_seconds": interval}
+
 
 def _git(args, timeout=10):
     """Run a git command inside the repo. Raises on missing binary/timeout;
@@ -3854,17 +3906,44 @@ def _do_update_check():
 
 def _cached_update_check(force=False):
     """Return a recent _do_update_check() result, refreshing at most once per
-    config.UPDATE_CHECK_CACHE_TTL seconds. The lock keeps concurrent pollers
-    from each firing their own `git fetch`."""
+    the configured interval. The lock keeps concurrent pollers (and the
+    background scheduler) from each firing their own `git fetch`."""
+    ttl = _update_check_settings()["interval_seconds"]
     now = time.time()
     with _update_check_lock:
         cached = _update_check_cache["data"]
-        if not force and cached is not None and (now - _update_check_cache["at"]) < config.UPDATE_CHECK_CACHE_TTL:
+        if not force and cached is not None and (now - _update_check_cache["at"]) < ttl:
             return dict(cached, cached=True)
         fresh = _do_update_check()
         _update_check_cache["at"] = time.time()
         _update_check_cache["data"] = fresh
         return dict(fresh, cached=False)
+
+
+# In "always" mode a daemon thread keeps the cache warm on the interval so the
+# check runs even with no browser open. In "visible" mode it stays idle and
+# the browser poll drives everything (pausing when no tab is watching). It
+# wakes often and lets _cached_update_check's TTL gate the actual fetch, so a
+# shorter interval saved in Settings takes effect within a wake tick rather
+# than after the old interval elapses.
+_update_scheduler_started = False
+
+
+def _update_check_scheduler():
+    while True:
+        try:
+            if config.UPDATE_CHECK_ENABLED and \
+                    _update_check_settings()["mode"] == "always":
+                _cached_update_check(force=False)
+        except Exception:
+            # Never let the scheduler die; the next tick retries.
+            pass
+        time.sleep(15)
+
+
+if config.UPDATE_CHECK_ENABLED and not _update_scheduler_started:
+    _update_scheduler_started = True
+    threading.Thread(target=_update_check_scheduler, daemon=True).start()
 
 
 @app.route("/api/update-status")
@@ -3873,11 +3952,54 @@ def api_update_status():
     if not config.UPDATE_CHECK_ENABLED:
         return jsonify({"ok": True, "enabled": False, "behind": 0})
     force = request.args.get("fresh", "").lower() in ("1", "true", "yes")
+    settings = _update_check_settings()
     data = _cached_update_check(force=force)
     return jsonify({
-        "cache_ttl_seconds": config.UPDATE_CHECK_CACHE_TTL,
+        # The browser paces its poll off this, so it reflects the runtime
+        # interval, not the env-var default.
+        "cache_ttl_seconds": settings["interval_seconds"],
+        "mode": settings["mode"],
         **data,
     })
+
+
+@app.route("/api/update-check/config", methods=["GET"])
+@login_required
+def api_update_check_config_get():
+    settings = _update_check_settings()
+    return jsonify({
+        "ok": True,
+        "enabled": config.UPDATE_CHECK_ENABLED,
+        "mode": settings["mode"],
+        "interval_seconds": settings["interval_seconds"],
+        "min_interval_seconds": MIN_UPDATE_CHECK_INTERVAL,
+        "max_interval_seconds": MAX_UPDATE_CHECK_INTERVAL,
+    })
+
+
+@app.route("/api/update-check/config", methods=["POST"])
+@login_required
+def api_update_check_config_set():
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "visible")).strip().lower()
+    if mode not in ("visible", "always"):
+        return _err("mode must be 'visible' or 'always'", 400)
+    interval_raw = data.get("interval_seconds")
+    try:
+        interval = int(interval_raw)
+    except (TypeError, ValueError):
+        return _err("interval_seconds must be a whole number of seconds", 400)
+    if not MIN_UPDATE_CHECK_INTERVAL <= interval <= MAX_UPDATE_CHECK_INTERVAL:
+        return _err(
+            f"interval_seconds must be between {MIN_UPDATE_CHECK_INTERVAL} "
+            f"and {MAX_UPDATE_CHECK_INTERVAL}", 400)
+    cfg = _read_app_config()
+    cfg["update_check"] = {"mode": mode, "interval_seconds": interval}
+    try:
+        _write_app_config(cfg)
+    except OSError as e:
+        return _err(f"failed to write app config: {e}")
+    return jsonify({"ok": True, "mode": mode, "interval_seconds": interval})
 
 
 @app.route("/api/settings", methods=["GET"])

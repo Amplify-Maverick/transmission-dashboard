@@ -20,9 +20,21 @@
     else actions.appendChild(badge);
 
     const label = badge.querySelector('.update-label');
-    // Poll every 5 minutes. The server caches for UPDATE_CHECK_CACHE_TTL
-    // (15 min default) and only fetches once per window, so this is cheap.
-    const POLL_MS = 5 * 60 * 1000;
+    // How often the badge re-polls /api/update-status. The server only runs a
+    // real `git fetch` once per its configured interval (cheap cached reads in
+    // between), so we pace the poll off that interval — reported back as
+    // cache_ttl_seconds — clamped so a tiny interval doesn't spin and a huge
+    // one still surfaces a fresh count within a few minutes.
+    const MIN_POLL_MS = 30 * 1000;
+    const MAX_POLL_MS = 5 * 60 * 1000;
+    const DEFAULT_POLL_MS = 5 * 60 * 1000;
+    let pollMs = DEFAULT_POLL_MS;
+
+    function pollIntervalFrom(data) {
+        const ttl = Number(data && data.cache_ttl_seconds);
+        if (!isFinite(ttl) || ttl <= 0) return DEFAULT_POLL_MS;
+        return Math.max(MIN_POLL_MS, Math.min(MAX_POLL_MS, ttl * 1000));
+    }
 
     function hide() {
         badge.hidden = true;
@@ -78,7 +90,9 @@
             const res = await fetch('/api/update-status', { cache: 'no-store' });
             if (res.status === 401) return;
             if (!res.ok) { hide(); return; }
-            apply(await res.json());
+            const data = await res.json();
+            pollMs = pollIntervalFrom(data);
+            apply(data);
         } catch (err) {
             hide();
         } finally {
@@ -87,18 +101,25 @@
     }
 
     // Pause while the tab is hidden, matching tunnel.js — a background tab
-    // can't show the badge and each uncached refresh runs `git fetch`.
+    // can't show the badge, and in "visible" mode this poll is the only thing
+    // driving the check. (In "always" mode a server-side scheduler keeps the
+    // result fresh regardless, so the immediate poll on re-focus still shows
+    // an up-to-date count.) A self-rescheduling timeout, rather than a fixed
+    // setInterval, lets each tick adopt the server's current interval.
     let timer = null;
+    function tick() {
+        poll().finally(() => {
+            if (timer !== null) timer = setTimeout(tick, pollMs);
+        });
+    }
     function start() {
-        if (timer) return;
-        poll();
-        timer = setInterval(poll, POLL_MS);
+        if (timer !== null) return;
+        timer = 0;  // mark running before the first async poll resolves
+        tick();
     }
     function stop() {
-        if (timer) {
-            clearInterval(timer);
-            timer = null;
-        }
+        if (timer) clearTimeout(timer);
+        timer = null;
     }
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) stop();
