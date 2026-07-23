@@ -711,10 +711,16 @@
                 const d = await res.json();
                 if (d.running) {
                     ltBtn.disabled = true;
-                    const note = (d.seen_ips && d.seen_ips.length)
-                        ? `tracker saw ${d.seen_ips.join(', ')}, comparing…`
-                        : (d.announced ? 'tracker answered, waiting for the IP echo…'
-                                       : 'announcing to tracker…');
+                    let note;
+                    if (d.seen_ips && d.seen_ips.length) {
+                        note = `tracker saw ${d.seen_ips.join(', ')}, comparing…`;
+                    } else if (d.tracker_message) {
+                        note = `tracker said: ${d.tracker_message}`;
+                    } else if (d.announced) {
+                        note = 'announce attempted, waiting for the reply…';
+                    } else {
+                        note = 'announcing to tracker…';
+                    }
                     ltRender(`Running (${d.elapsed_seconds}s): ${note}`, 'var(--muted)');
                     if (!ltTimer) ltTimer = setInterval(ltPoll, 3000);
                 } else {

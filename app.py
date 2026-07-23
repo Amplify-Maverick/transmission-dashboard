@@ -4519,6 +4519,10 @@ def _tracker_test_evaluate():
             if msg:
                 messages.append(msg)
     seen_ips = _extract_public_ips(" ".join(messages))
+    # The raw tracker text is the key diagnostic when no IP is found: it
+    # distinguishes "Could not connect" (routing/reachability) from a real
+    # reply whose IP we failed to parse, from a normal tracker's "Success".
+    tracker_message = messages[-1] if messages else None
 
     # Fetch the expected exit IPs once per run (two outbound HTTPS calls) —
     # only once the tracker has something to compare, or we'd pay the cost on
@@ -4547,6 +4551,7 @@ def _tracker_test_evaluate():
         result = _tracker_test_finish({
             "verdict": verdict, "problems": problems,
             "seen_ips": seen_ips, "expected": expected, "announced": announced,
+            "tracker_message": tracker_message,
         })
         return {"running": False, "result": result}
 
@@ -4572,23 +4577,29 @@ def _tracker_test_evaluate():
                          "service (which returns your IP in the announce "
                          "reply). Use an echo magnet."],
             "seen_ips": seen_ips, "expected": expected, "announced": announced,
+            "tracker_message": tracker_message,
         })
         return {"running": False, "result": result}
 
     if elapsed > _TRACKER_TEST_TIMEOUT_SEC:
-        note = ("the tracker never answered the announce (dead magnet, or no "
-                "outbound path)" if not announced else
-                "the tracker answered but its reply contained no IP — the "
-                "magnet's tracker isn't an IP-echo tracker")
+        if not tracker_message:
+            note = ("the tracker never answered the announce — no reply was "
+                    "recorded (dead magnet, or transmission has no outbound "
+                    "path to the tracker)")
+        else:
+            note = ("transmission recorded a tracker reply but it held no "
+                    "readable IP. Tracker said: " + tracker_message)
         result = _tracker_test_finish({
             "verdict": "inconclusive", "problems": [note],
             "seen_ips": seen_ips, "expected": expected, "announced": announced,
+            "tracker_message": tracker_message,
         })
         return {"running": False, "result": result}
 
     return {
         "running": True, "verdict": "pending",
         "announced": announced, "seen_ips": seen_ips,
+        "tracker_message": tracker_message,
         "elapsed_seconds": int(elapsed),
         "timeout_seconds": _TRACKER_TEST_TIMEOUT_SEC,
         "started_at": state["started_at"],
