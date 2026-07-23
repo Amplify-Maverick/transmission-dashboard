@@ -441,11 +441,19 @@ that:
    if the tracker echoed nothing to check — never a silent pass. Results land
    in the event history, and the test magnet is removed afterwards.
 
-It's off by default because it adds a real (data-less) torrent and contacts
-two external services. It's a point-in-time probe, not a monitor — the live
-indicator remains the continuous check; run this when you want end-to-end
-confirmation (after VPN config changes, provider switches, or just for peace
-of mind).
+It's off by default because it adds a torrent and contacts two external
+services. Besides manual runs, **Run automatically** schedules server-side
+periodic runs (every 6 h / daily / weekly) whose outcomes land in the event
+history — a detected leak is logged as an error event. The live indicator
+remains the continuous second-by-second check; the tracker test is the
+periodic end-to-end confirmation.
+
+Note that a regular torrent's magnet (an Ubuntu ISO, say) can't serve as the
+test magnet: ordinary trackers don't report the IP they saw, so there would
+be nothing to verify — only IP-echo trackers give that view. The test never
+downloads content either way: the torrent is stopped the moment the tracker's
+answer is recorded and removed when the run ends, so even a content magnet
+pasted by mistake transfers nothing.
 
 Two optional knobs tune the checks (both commented in `.env.example`):
 `WG_HANDSHAKE_STALE_SEC` (default 180 — how old a handshake may be before the

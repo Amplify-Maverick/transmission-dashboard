@@ -4215,13 +4215,20 @@ def api_update_check_config_set():
 #      exit fetch), pass if everything matches, inconclusive otherwise;
 #   5. removes the test magnet and logs a leak to the event history.
 #
-# No background thread: the System page polls /status while the test runs;
-# a timed-out or abandoned run is cleaned up lazily (by label) on the next
-# start. Off by default — it adds a real torrent and calls external services.
+# Runs one-off from the System page button, or periodically when
+# interval_hours > 0 (a scheduler thread starts it and drives the same
+# evaluate loop the page polls; results land in the event history either
+# way). The test never downloads content: the torrent is stopped the moment
+# the announce is recorded — echo magnets are data-less anyway, and this
+# guards against a real content magnet pasted into the field. A timed-out or
+# abandoned run is cleaned up lazily (by label) on the next start. Off by
+# default — it adds a torrent and calls external services.
 
 _TRACKER_TEST_LABEL = "ip-leak-test"
 _TRACKER_TEST_TIMEOUT_SEC = 120
 _TRACKER_TEST_DEFAULT_ECHO_URL = "https://am.i.mullvad.net/ip"
+
+_TRACKER_TEST_MAX_INTERVAL_HOURS = 24 * 30
 
 _tracker_test_lock = threading.Lock()
 _tracker_test = {
@@ -4230,13 +4237,16 @@ _tracker_test = {
     "started_at": None,     # ISO wall time, for the UI
     "started_mono": None,   # monotonic, for the timeout
     "expected": None,       # {"v4": ..., "v6": ...} exit IPs, fetched once/run
+    "stopped_after_announce": False,
     "result": None,         # last finished run's result dict
 }
 
 
 def _tracker_test_settings():
     stored = _read_app_config().get("tracker_test")
-    out = {"enabled": False, "magnet": "", "echo_url": _TRACKER_TEST_DEFAULT_ECHO_URL}
+    out = {"enabled": False, "magnet": "",
+           "echo_url": _TRACKER_TEST_DEFAULT_ECHO_URL,
+           "interval_hours": 0}
     if isinstance(stored, dict):
         if isinstance(stored.get("enabled"), bool):
             out["enabled"] = stored["enabled"]
@@ -4244,6 +4254,9 @@ def _tracker_test_settings():
             out["magnet"] = stored["magnet"].strip()
         if isinstance(stored.get("echo_url"), str) and stored["echo_url"].strip():
             out["echo_url"] = stored["echo_url"].strip()
+        iv = stored.get("interval_hours")
+        if isinstance(iv, int) and 0 <= iv <= _TRACKER_TEST_MAX_INTERVAL_HOURS:
+            out["interval_hours"] = iv
     return out
 
 
@@ -4398,8 +4411,24 @@ def api_tracker_test_config_set():
     scheme = urllib.parse.urlsplit(echo_url).scheme
     if scheme not in ("http", "https"):
         return _err("echo_url must be an http(s) URL", 400)
+    interval_raw = data.get("interval_hours", 0)
+    try:
+        interval_hours = int(interval_raw)
+    except (TypeError, ValueError):
+        return _err("interval_hours must be a whole number of hours", 400)
+    if not 0 <= interval_hours <= _TRACKER_TEST_MAX_INTERVAL_HOURS:
+        return _err(
+            f"interval_hours must be between 0 (off) and "
+            f"{_TRACKER_TEST_MAX_INTERVAL_HOURS}", 400)
     cfg = _read_app_config()
-    cfg["tracker_test"] = {"enabled": enabled, "magnet": magnet, "echo_url": echo_url}
+    entry = cfg.get("tracker_test")
+    if not isinstance(entry, dict):
+        entry = {}
+    # Merge rather than replace: last_run_at (the periodic timer) lives in the
+    # same entry and must survive a settings save.
+    entry.update({"enabled": enabled, "magnet": magnet, "echo_url": echo_url,
+                  "interval_hours": interval_hours})
+    cfg["tracker_test"] = entry
     try:
         _write_app_config(cfg)
     except OSError as e:
@@ -4407,18 +4436,13 @@ def api_tracker_test_config_set():
     return jsonify({"ok": True, **_tracker_test_settings()})
 
 
-@app.route("/api/tracker-test/start", methods=["POST"])
-@login_required
-def api_tracker_test_start():
-    settings = _tracker_test_settings()
-    if not settings["enabled"]:
-        return _err("the tracker leak test is disabled — enable it in Settings", 400)
-    if not settings["magnet"]:
-        return _err("no test magnet configured — paste one in Settings "
-                    "(see the hint there for where to get one)", 400)
+def _tracker_test_start_core(settings):
+    """Add the test magnet and mark the run started. Shared by the Start
+    endpoint and the periodic scheduler. Returns (torrent_id, error) — one of
+    the two is always None."""
     with _tracker_test_lock:
         if _tracker_test["running"]:
-            return _err("a tracker test is already running", 409)
+            return None, "a tracker test is already running"
         # Clean up leftovers from an interrupted earlier run before adding.
         try:
             for t in client.find_torrents_by_label(_TRACKER_TEST_LABEL):
@@ -4428,12 +4452,12 @@ def api_tracker_test_start():
         try:
             res = client.add_magnet(settings["magnet"], paused=False)
         except Exception as e:
-            return _err(f"failed to add the test magnet: {e}")
+            return None, f"failed to add the test magnet: {e}"
         args = res.get("arguments", {}) if isinstance(res, dict) else {}
         added = args.get("torrent-added") or args.get("torrent-duplicate") or {}
         tid = added.get("id")
         if tid is None:
-            return _err("transmission did not return a torrent id for the test magnet")
+            return None, "transmission did not return a torrent id for the test magnet"
         try:
             client.set_labels(tid, [_TRACKER_TEST_LABEL])
         except Exception:
@@ -4444,18 +4468,32 @@ def api_tracker_test_start():
             "started_at": datetime.now(timezone.utc).isoformat(),
             "started_mono": time.monotonic(),
             "expected": None,
+            "stopped_after_announce": False,
             "result": None,
         })
-    return jsonify({"ok": True, "torrent_id": tid})
+    # Every run (manual or scheduled) resets the periodic timer — persisted
+    # so a restart doesn't trigger an immediate re-run.
+    try:
+        cfg = _read_app_config()
+        entry = cfg.get("tracker_test")
+        if not isinstance(entry, dict):
+            entry = {}
+        entry["last_run_at"] = datetime.now(timezone.utc).isoformat()
+        cfg["tracker_test"] = entry
+        _write_app_config(cfg)
+    except OSError:
+        pass
+    return tid, None
 
 
-@app.route("/api/tracker-test/status")
-@login_required
-def api_tracker_test_status():
+def _tracker_test_evaluate():
+    """One evaluation step of the running test: read trackerStats, compare,
+    finish if decided or timed out. Drives both the System page's status
+    polling and the scheduler's internal loop. Returns the status payload."""
     with _tracker_test_lock:
         state = dict(_tracker_test)
     if not state["running"]:
-        return jsonify({"ok": True, "running": False, "result": state["result"]})
+        return {"running": False, "result": state["result"]}
 
     tid = state["torrent_id"]
     try:
@@ -4468,7 +4506,7 @@ def api_tracker_test_status():
             "problems": ["the test torrent disappeared before the tracker answered"],
             "seen_ips": [], "expected": state.get("expected"), "announced": False,
         })
-        return jsonify({"ok": True, "running": False, "result": result})
+        return {"running": False, "result": result}
 
     announced = False
     messages = []
@@ -4480,6 +4518,19 @@ def api_tracker_test_status():
             if msg:
                 messages.append(msg)
     seen_ips = _extract_public_ips(" ".join(messages))
+
+    if announced and not state.get("stopped_after_announce"):
+        # The announce we needed is on record — stop the torrent so a magnet
+        # with real content can't download anything for the rest of the test
+        # window. trackerStats stay readable on a stopped torrent, and echo
+        # magnets are data-less anyway, so this costs nothing.
+        try:
+            client.stop(tid)
+        except Exception:
+            pass
+        with _tracker_test_lock:
+            if _tracker_test["torrent_id"] == tid:
+                _tracker_test["stopped_after_announce"] = True
 
     # Fetch the expected exit IPs once per run (two outbound HTTPS calls) —
     # only once the tracker has something to compare, or we'd pay the cost on
@@ -4509,7 +4560,7 @@ def api_tracker_test_status():
             "verdict": verdict, "problems": problems,
             "seen_ips": seen_ips, "expected": expected, "announced": announced,
         })
-        return jsonify({"ok": True, "running": False, "result": result})
+        return {"running": False, "result": result}
     if elapsed > _TRACKER_TEST_TIMEOUT_SEC:
         note = ("the tracker answered but its response contained no IP to "
                 "check — use a magnet from an IP-echo service"
@@ -4520,15 +4571,37 @@ def api_tracker_test_status():
             "verdict": "inconclusive", "problems": [note],
             "seen_ips": seen_ips, "expected": expected, "announced": announced,
         })
-        return jsonify({"ok": True, "running": False, "result": result})
+        return {"running": False, "result": result}
 
-    return jsonify({
-        "ok": True, "running": True, "verdict": "pending",
+    return {
+        "running": True, "verdict": "pending",
         "announced": announced, "seen_ips": seen_ips,
         "elapsed_seconds": int(elapsed),
         "timeout_seconds": _TRACKER_TEST_TIMEOUT_SEC,
         "started_at": state["started_at"],
-    })
+    }
+
+
+@app.route("/api/tracker-test/start", methods=["POST"])
+@login_required
+def api_tracker_test_start():
+    settings = _tracker_test_settings()
+    if not settings["enabled"]:
+        return _err("the tracker leak test is disabled — enable it in Settings", 400)
+    if not settings["magnet"]:
+        return _err("no test magnet configured — paste one in Settings "
+                    "(see the hint there for where to get one)", 400)
+    tid, err = _tracker_test_start_core(settings)
+    if tid is None:
+        status = 409 if "already running" in err else 500
+        return _err(err, status)
+    return jsonify({"ok": True, "torrent_id": tid})
+
+
+@app.route("/api/tracker-test/status")
+@login_required
+def api_tracker_test_status():
+    return jsonify({"ok": True, **_tracker_test_evaluate()})
 
 
 @app.route("/api/tracker-test/stop", methods=["POST"])
@@ -4543,6 +4616,60 @@ def api_tracker_test_stop():
         "seen_ips": [], "expected": None, "announced": False,
     })
     return jsonify({"ok": True, "running": False, "result": result})
+
+
+def _tracker_test_due(settings, last_run_at, now=None):
+    """Pure scheduling decision (unit-tested): is a periodic run due? Requires
+    the feature enabled with a magnet and a non-zero interval; a missing or
+    unparseable last_run_at counts as due (never ran)."""
+    if not settings.get("enabled") or not settings.get("magnet"):
+        return False
+    hours = settings.get("interval_hours") or 0
+    if hours <= 0:
+        return False
+    if not last_run_at:
+        return True
+    try:
+        last = datetime.fromisoformat(last_run_at)
+    except (TypeError, ValueError):
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - last).total_seconds() >= hours * 3600
+
+
+def _tracker_test_scheduler():
+    """Periodic-run driver. Wakes every minute; when a run is due it starts
+    the test (which persists last_run_at, so restarts don't re-run early) and
+    drives the same evaluate loop the System page polls. Results reach the
+    event history via _tracker_test_finish like any manual run."""
+    while True:
+        time.sleep(60)
+        try:
+            settings = _tracker_test_settings()
+            entry = _read_app_config().get("tracker_test")
+            last_run_at = entry.get("last_run_at") if isinstance(entry, dict) else None
+            if not _tracker_test_due(settings, last_run_at):
+                continue
+            tid, _sched_err = _tracker_test_start_core(settings)
+            if tid is None:
+                continue  # manual run in progress or add failed; retry next due
+            deadline = time.monotonic() + _TRACKER_TEST_TIMEOUT_SEC + 30
+            while time.monotonic() < deadline:
+                time.sleep(5)
+                if not _tracker_test_evaluate().get("running"):
+                    break
+        except Exception:
+            # Never let the scheduler die; the next tick retries.
+            pass
+
+
+_tracker_test_scheduler_started = False
+
+if not _tracker_test_scheduler_started:
+    _tracker_test_scheduler_started = True
+    threading.Thread(target=_tracker_test_scheduler, daemon=True).start()
 
 
 @app.route("/api/settings", methods=["GET"])

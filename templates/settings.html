@@ -326,7 +326,25 @@
                         saw inside the tracker status message. TorGuard's <em>Check&nbsp;My&nbsp;Torrent&nbsp;IP</em>
                         page generates one; ipleak.net's <em>Torrent&nbsp;address&nbsp;detection</em> magnet also
                         works (its per-session results additionally appear on their page). The magnet
-                        must include a tracker (<code>tr=</code>).
+                        must include a tracker (<code>tr=</code>). A regular torrent's magnet (an Ubuntu
+                        ISO, say) will <strong>not</strong> work — ordinary trackers don't report the IP
+                        they saw, so there'd be nothing to check. Nothing is ever downloaded: the test
+                        torrent is stopped the moment the tracker answers and removed when the test ends.
+                    </p>
+                </div>
+
+                <div class="settings-field settings-field-wide">
+                    <label class="field-label" for="leaktest-interval-select">Run automatically</label>
+                    <select id="leaktest-interval-select">
+                        <option value="0">Never — manual runs only</option>
+                        <option value="6">Every 6 hours</option>
+                        <option value="24">Daily</option>
+                        <option value="168">Weekly</option>
+                    </select>
+                    <p class="field-hint">
+                        Periodic runs happen server-side (no browser needed) and log their outcome to
+                        the event history — a detected leak is recorded as an error event. Manual runs
+                        reset the timer.
                     </p>
                 </div>
 
@@ -1152,6 +1170,7 @@
         const ltEnabledEl = document.getElementById('leaktest-enabled-select');
         const ltMagnetEl = document.getElementById('leaktest-magnet-input');
         const ltEchoEl = document.getElementById('leaktest-echo-input');
+        const ltIntervalEl = document.getElementById('leaktest-interval-select');
         const ltSaveBtn = document.getElementById('leaktest-save-btn');
         const ltErrorEl = document.getElementById('leaktest-error');
 
@@ -1173,6 +1192,8 @@
                 ltEnabledEl.value = data.enabled ? 'on' : 'off';
                 ltMagnetEl.value = data.magnet || '';
                 ltEchoEl.value = data.echo_url || '';
+                const iv = String(data.interval_hours || 0);
+                ltIntervalEl.value = ['0', '6', '24', '168'].includes(iv) ? iv : '0';
             } catch (err) {
                 showLeaktestError('Failed to load leak-test settings: ' + err.message);
             }
@@ -1197,6 +1218,7 @@
                         enabled: enabled,
                         magnet: magnet,
                         echo_url: ltEchoEl.value.trim(),
+                        interval_hours: parseInt(ltIntervalEl.value, 10) || 0,
                     }),
                 });
                 if (res.status === 401) { unauthorizedRedirect(); return; }
@@ -1215,7 +1237,7 @@
         }
 
         ltSaveBtn.addEventListener('click', saveLeaktestConfig);
-        [ltEnabledEl, ltMagnetEl, ltEchoEl].forEach(el =>
+        [ltEnabledEl, ltMagnetEl, ltEchoEl, ltIntervalEl].forEach(el =>
             el.addEventListener('input', clearLeaktestError));
 
         loadLeaktestConfig();

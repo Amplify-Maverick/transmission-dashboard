@@ -96,6 +96,55 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(v, "pass")
 
 
+class ScheduleDueTests(unittest.TestCase):
+    def _settings(self, **over):
+        base = {"enabled": True, "magnet": "magnet:?xt=urn:btih:x&tr=http://t/a",
+                "interval_hours": 24}
+        base.update(over)
+        return base
+
+    def test_not_due_when_disabled_or_no_magnet_or_no_interval(self):
+        self.assertFalse(app._tracker_test_due(self._settings(enabled=False), None))
+        self.assertFalse(app._tracker_test_due(self._settings(magnet=""), None))
+        self.assertFalse(app._tracker_test_due(self._settings(interval_hours=0), None))
+
+    def test_due_when_never_ran(self):
+        self.assertTrue(app._tracker_test_due(self._settings(), None))
+
+    def test_due_when_garbage_last_run(self):
+        self.assertTrue(app._tracker_test_due(self._settings(), "not-a-date"))
+
+    def test_due_respects_interval(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+        recent = (now - timedelta(hours=23)).isoformat()
+        old = (now - timedelta(hours=25)).isoformat()
+        self.assertFalse(app._tracker_test_due(self._settings(), recent, now=now))
+        self.assertTrue(app._tracker_test_due(self._settings(), old, now=now))
+
+
+class StopAfterAnnounceTests(unittest.TestCase):
+    """Once the announce is recorded the test torrent must be stopped, so a
+    content magnet pasted into the field can never keep downloading."""
+
+    def test_evaluate_stops_torrent_after_announce(self):
+        with patch.object(app, "_tracker_test", {
+                "running": True, "torrent_id": 42,
+                "started_at": "2026-07-22T00:00:00+00:00",
+                "started_mono": app.time.monotonic(),
+                "expected": None, "stopped_after_announce": False,
+                "result": None}), \
+             patch("app.client.get_tracker_stats", return_value={
+                 "id": 42,
+                 "trackerStats": [{"hasAnnounced": True,
+                                   "lastAnnounceSucceeded": True,
+                                   "lastAnnounceResult": "no ip here"}]}), \
+             patch("app.client.stop") as m_stop:
+            payload = app._tracker_test_evaluate()
+        m_stop.assert_called_once_with(42)
+        self.assertTrue(payload["running"])  # still waiting for an IP echo
+
+
 class SettingsParsingTests(unittest.TestCase):
     def _with_config(self, stored):
         return patch("app._read_app_config", return_value={"tracker_test": stored})
