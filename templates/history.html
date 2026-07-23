@@ -12,7 +12,7 @@
         <div class="brand">transmission-dashboard</div>
         <nav class="primary-nav">
             <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
-            <a href="{{ url_for('system') }}" class="nav-link">System</a>
+            <a href="{{ url_for('system') }}" class="nav-link">Stats</a>
             <a href="{{ url_for('history') }}" class="nav-link active">History</a>
             <a href="{{ url_for('events') }}" class="nav-link">Events</a>
             <a href="{{ url_for('settings') }}" class="nav-link">Settings</a>
@@ -92,7 +92,7 @@
 
     <nav class="bottom-nav" aria-label="Sections">
         <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
-        <a href="{{ url_for('system') }}" class="bottom-nav-link">System</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">Stats</a>
         <a href="{{ url_for('history') }}" class="bottom-nav-link active">History</a>
         <button type="button" class="bottom-nav-link" data-open="more-sheet">More</button>
     </nav>
