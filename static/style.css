@@ -3214,12 +3214,17 @@ body.checking .torrent-list { padding-bottom: 96px; }
 }
 
 .settings-inline-field input {
-    flex: 0 1 8em;
+    flex: 0 0 5em;
+    width: 5em;
     min-width: 0;
+    text-align: center;
 }
 
+/* Size the unit dropdown to its content instead of the shared select
+   width:100%, so it sits snugly next to the number field. */
 .settings-inline-field select {
     flex: 0 0 auto;
+    width: auto;
 }
 
 .settings-grid > .field-hint {
