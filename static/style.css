@@ -45,7 +45,11 @@ a, button {
 
 html, body {
     margin: 0;
-    height: 100%;
+    height: 100vh;
+    /* Track the *dynamic* viewport so the app shell (and the bottom nav
+       pinned to its bottom edge) shrinks with the mobile browser toolbar
+       instead of extending underneath it. */
+    height: 100dvh;
     background: var(--bg);
     color: var(--text);
     font-family: var(--sans);
@@ -2156,7 +2160,7 @@ body.checking .torrent-list { padding-bottom: 96px; }
 .guide-callout strong { color: var(--yellow); }
 
 @media (max-width: 640px) {
-    .guide-page { padding: 16px 12px 80px; }
+    .guide-page { padding: 16px 12px 32px; }
     .guide-article { padding: 20px 16px 22px; }
     .guide-article h1 { font-size: 18px; }
     .guide-article h2 { font-size: 15px; }
@@ -3761,13 +3765,12 @@ body.checking .torrent-list { padding-bottom: 96px; }
    ctx-menu bottom sheet, no-horizontal-scroll safety nets.
    ============================================================ */
 
-/* Bottom nav is hidden by default and only enabled on mobile. */
+/* Bottom nav is hidden by default and only enabled on mobile. It lives in
+   the body's flex column (not position: fixed) so it stays pinned to the
+   bottom of the dynamic viewport and never slides under the iOS toolbar. */
 .bottom-nav {
     display: none;
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    flex: 0 0 auto;
     z-index: 80;
     background: var(--panel);
     border-top: 1px solid var(--border);
@@ -3822,14 +3825,8 @@ body.checking .torrent-list { padding-bottom: 96px; }
     /* Topbar is now a single row (primary-nav was the wrapping element). */
     .topbar { flex-wrap: nowrap; align-items: center; }
 
-    /* Scrollable page bodies need room above the fixed bottom nav. */
-    .torrent-list {
-        padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-    }
-    .settings-page,
-    .system-page {
-        padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
-    }
+    /* The bottom nav is an in-flow flex child now, so scroll bodies no
+       longer need to reserve space above a floating bar. */
 
     /* Toasts shouldn't sit under the bottom nav. */
     .toast-container {
