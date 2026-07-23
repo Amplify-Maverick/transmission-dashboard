@@ -3206,6 +3206,22 @@ body.checking .torrent-list { padding-bottom: 96px; }
     grid-column: 1 / -1;
 }
 
+/* Number input paired with a unit dropdown (e.g. the update-check interval). */
+.settings-inline-field {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.settings-inline-field input {
+    flex: 0 1 8em;
+    min-width: 0;
+}
+
+.settings-inline-field select {
+    flex: 0 0 auto;
+}
+
 .settings-grid > .field-hint {
     margin-top: 0;
 }
