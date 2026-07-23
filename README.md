@@ -140,23 +140,57 @@ Serves on `http://127.0.0.1:5000` with Flask's dev server (localhost only).
 
 ### Production (systemd + gunicorn)
 
+Running under systemd is the recommended way to run the dashboard in
+production: it keeps the app alive across crashes and **starts it
+automatically on boot**, with no terminal or manual step after a reboot.
+
 A unit template is provided at
-`systemd/transmission-dashboard.service.example`. Copy it, replace every
-`CHANGE_ME`, and enable it:
+`systemd/transmission-dashboard.service.example`. Install it, then enable it:
 
 ```bash
+# 1. Copy the template into place and fill in User/Group/paths
 sudo cp systemd/transmission-dashboard.service.example \
   /etc/systemd/system/transmission-dashboard.service
-sudoedit /etc/systemd/system/transmission-dashboard.service   # set User/Group/paths
+sudoedit /etc/systemd/system/transmission-dashboard.service   # replace every CHANGE_ME
 
+# 2. Load the new unit and start it at boot + right now
 sudo systemctl daemon-reload
 sudo systemctl enable --now transmission-dashboard
-journalctl -u transmission-dashboard -f
 ```
 
+`enable` is the part that makes it start on boot — it links the unit into
+`multi-user.target` (see the `[Install]` section of the file), so systemd
+launches it every time the machine comes up. `--now` also starts it
+immediately so you don't have to reboot to try it. (Use plain
+`systemctl start` / `stop` for a one-off run that does **not** touch the
+boot setting.)
+
+Before you edit the unit, make sure a virtualenv exists at `<repo>/.venv` with
+the dependencies installed (from the [Install](#install) step above) — the
+`ExecStart` line runs `.venv/bin/gunicorn`, so the service won't start without
+it.
+
+Verify it's running and confirm the boot hook took:
+
+```bash
+systemctl status transmission-dashboard      # should say "active (running)"
+systemctl is-enabled transmission-dashboard  # should print "enabled"
+journalctl -u transmission-dashboard -f      # follow the logs (Ctrl-C to stop)
+```
+
+The surest test is to `sudo reboot` and check `systemctl status` again once the
+box is back — the dashboard should already be up with no intervention.
+
 The unit runs a single gunicorn worker with 8 threads (intentional — see the
-comments in the file), binding to `127.0.0.1:5000`. Put it behind a reverse
-proxy (nginx/Caddy) with TLS if you expose it beyond localhost.
+comments in the file), binding to `127.0.0.1:5000`. It starts after
+`network-online.target` so the network is up first. If `transmission-daemon`
+runs on the same host, you don't need to add an ordering dependency — the
+dashboard tolerates the daemon not being ready yet and simply shows a "stale"
+tick until RPC answers. Put the dashboard behind a reverse proxy (nginx/Caddy)
+with TLS if you expose it beyond localhost.
+
+To stop it starting on boot later, `sudo systemctl disable --now
+transmission-dashboard` (the `--now` also stops the running instance).
 
 ---
 
@@ -232,13 +266,51 @@ compares the server against `origin/main`, so commit and push periodically too.
 
 The topbar can show a live WireGuard tunnel-health indicator so you can tell
 at a glance that Transmission's traffic is actually flowing through your VPN.
-Set `TUNNEL_IFACE` in `.env` to your WireGuard interface name (e.g. the device
-`wg show` lists). Leave it blank to hide the indicator entirely.
+
+### `TUNNEL_IFACE`
+
+This is the one setting that turns the indicator on. Set it in `.env` to the
+**name of your WireGuard interface** — just the interface name, not an IP
+address or a config path. On most setups that's whatever `wg-quick up <name>`
+brought up (e.g. `mullvad`, `wg0`).
+
+Find the exact name with either of these:
+
+```bash
+sudo wg show          # lists each interface by name (the "interface:" line)
+ip link show          # WireGuard devices show up here too
+```
+
+Then put that name in `.env`:
+
+```
+TUNNEL_IFACE=mullvad
+```
+
+Behavior:
+
+- **Set to a valid interface** → the topbar shows the live tunnel indicator.
+- **Left blank** (the default) → the indicator is hidden entirely and no
+  tunnel checks run. Use this if you don't route Transmission through a VPN, or
+  don't want the indicator.
+
+The tunnel's IP is **not** configured here — it's read live off the interface
+on every check, so it keeps working after your VPN hands you a new address.
+Only the interface *name* is pinned in `.env`.
 
 The indicator goes green only when the interface is up, a peer handshake is
 recent, **and** Transmission's `bind-address-ipv4` matches the interface's
 current IP — so it catches both a dropped tunnel and a leak out the bare link.
-`wg show` needs `CAP_NET_ADMIN`; the systemd unit grants it (see its comments).
+Two optional knobs tune the checks (both commented in `.env.example`):
+`WG_HANDSHAKE_STALE_SEC` (default 180 — how old a handshake may be before the
+peer counts as down) and `TUNNEL_CHECK_CACHE_TTL` (default 30 — how long a
+result is cached before the next probe).
+
+Reading the interface state uses `wg show`, which makes a netlink call that
+needs `CAP_NET_ADMIN`. The systemd unit grants exactly that capability (see its
+comments); without it the check sees no handshake and always reports "down". If
+you run the app outside systemd, either grant the capability to the `wg` binary
+(`sudo setcap cap_net_admin+ep "$(command -v wg)"`) or run it as root.
 
 ### Tunnel auto-recovery
 
