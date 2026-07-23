@@ -638,6 +638,7 @@
                 warn: 'attention',
                 down: 'down',
                 unknown: 'partial',
+                off: 'not configured',
             }[t.overall || 'unknown'] || '—';
             document.getElementById('tunnel-sub').textContent =
                 `${t.interface || 'wg'} · ${sub}`;
@@ -664,6 +665,12 @@
                 bindText = `Transmission bind-address-ipv4=${t.transmission_bind_address}`;
             } else {
                 bindText = 'Transmission bind address: unknown';
+            }
+            // A v6 or routing leak can trip while the v4 bind reads fine —
+            // don't show the reassuring "bound" line then; show the leak.
+            const leakReasons = ['ipv6_leak', 'route_leak', 'route_leak_v6', 'ipv6_unverifiable'];
+            if (leakReasons.includes(t.reason) && t.error) {
+                bindText = t.error;
             }
             document.getElementById('tunnel-bind').textContent = bindText;
         }

@@ -299,6 +299,7 @@ _FAKE_TORRENTS = [
 _MOCK_SESSION = {
     "download-dir": config.DOWNLOAD_DIR,
     "bind-address-ipv4": "0.0.0.0",
+    "bind-address-ipv6": "::",
 }
 
 
@@ -316,6 +317,9 @@ class MockTransmissionClient:
 
     def get_session_bind_address(self):
         return _MOCK_SESSION.get("bind-address-ipv4")
+
+    def get_session_bind_address_ipv6(self):
+        return _MOCK_SESSION.get("bind-address-ipv6")
 
     def set_download_dir(self, path):
         _MOCK_SESSION["download-dir"] = path

@@ -376,13 +376,33 @@ The tunnel's IP is **not** configured here — it's read live off the interface
 on every check, so it keeps working after your VPN hands you a new address.
 Only the interface *name* is pinned in `.env`.
 
-The indicator goes green only when the interface is up, a peer handshake is
-recent, **and** Transmission's `bind-address-ipv4` matches the interface's
-current IP — so it catches both a dropped tunnel and a leak out the bare link.
+The indicator is designed so that **green means traffic is actually confined
+to the tunnel — never a false all-clear.** It goes green only when *all* of
+these hold, each read from live state (nothing hardcoded):
+
+1. the interface exists, is up, and has an IPv4;
+2. a peer handshake within `WG_HANDSHAKE_STALE_SEC`;
+3. Transmission's `bind-address-ipv4` equals the interface's current IPv4;
+4. **packets from that tunnel IPv4 actually egress the tunnel interface** —
+   verified with `ip route get`, so a bind with a missing/broken policy route
+   (which would leak or black-hole) can't show green;
+5. **no IPv6 leak** — either the host has no globally-routable IPv6 on a bare
+   interface, or Transmission's `bind-address-ipv6` is the tunnel's IPv6 *and*
+   that traffic egresses the tunnel too.
+
+Checks 4 and 5 close the two leaks a naïve bind check misses: a correct
+`bind-address-ipv4` with no matching route still leaks, and an IPv4-only check
+is blind to BitTorrent leaking your real address over IPv6. A leak shows a red
+**"IPv6 leak"** / **"Route leak"** label (not just "down"), and if the check
+genuinely can't confirm IPv6 is confined it shows amber rather than green.
+Everything is derived live, so it keeps working after the tunnel IP changes.
+
 Two optional knobs tune the checks (both commented in `.env.example`):
 `WG_HANDSHAKE_STALE_SEC` (default 180 — how old a handshake may be before the
 peer counts as down) and `TUNNEL_CHECK_CACHE_TTL` (default 30 — how long a
-result is cached before the next probe).
+result is cached before the next probe). Both `wg show` and `ip route get`
+back the checks; `ip` (iproute2) ships alongside `wg-quick`, so it's always
+present where the tunnel is.
 
 Reading the interface state uses `wg show`, which makes a netlink call that
 needs `CAP_NET_ADMIN`. The systemd unit grants exactly that capability (see its

@@ -109,9 +109,11 @@ class TransmissionClient:
         # paying a fresh connect + auth handshake per call.
         self._http = requests.Session()
         self._http.auth = HTTPBasicAuth(self.user, self.password)
-        # (mtime, value) cache for the settings.json bind-address read so
-        # repeated tunnel checks don't re-parse the file every call.
+        # (mtime, value) caches for the settings.json bind-address reads so
+        # repeated tunnel checks don't re-parse the file every call. Separate
+        # slots for v4 and v6 since the leak check reads both.
         self._settings_bind_cache = (None, None)
+        self._settings_bind6_cache = (None, None)
 
     # (connect, read) timeout. The old flat 30s meant a bogged-down daemon
     # could pin a gunicorn thread for half a minute per poll; with only 8
@@ -322,11 +324,24 @@ class TransmissionClient:
         the RPC omits it we fall back to parsing settings.json — which is
         now the actual source of truth for this option.
         """
+        return self._read_bind_setting("bind-address-ipv4", "_settings_bind_cache")
+
+    def get_session_bind_address_ipv6(self):
+        """Return the daemon's bind-address-ipv6, or None if absent.
+
+        Same story as the IPv4 read (RPC dropped it on 4.x, settings.json is
+        the source of truth). The tunnel leak check needs this because binding
+        only IPv4 leaves IPv6 BitTorrent traffic free to egress the bare link.
+        """
+        return self._read_bind_setting("bind-address-ipv6", "_settings_bind6_cache")
+
+    def _read_bind_setting(self, field, cache_attr):
+        """Shared reader for the bind-address-ipv4/ipv6 options: try the RPC
+        first, then fall back to an mtime-cached parse of settings.json. Returns
+        the value or None when absent/unreadable."""
         try:
-            result = self.request(
-                "session-get", {"fields": ["bind-address-ipv4"]}
-            )
-            v = result.get("arguments", {}).get("bind-address-ipv4")
+            result = self.request("session-get", {"fields": [field]})
+            v = result.get("arguments", {}).get(field)
             if v:
                 return v
         except Exception:
@@ -335,16 +350,16 @@ class TransmissionClient:
             mtime = os.path.getmtime(config.TR_SETTINGS_FILE)
         except OSError:
             return None
-        cached_mtime, cached_val = self._settings_bind_cache
+        cached_mtime, cached_val = getattr(self, cache_attr)
         if cached_mtime == mtime:
             return cached_val
         try:
             with open(config.TR_SETTINGS_FILE, "r") as f:
                 settings = json.load(f)
-            v = settings.get("bind-address-ipv4") or None
+            v = settings.get(field) or None
         except (OSError, ValueError):
             return None
-        self._settings_bind_cache = (mtime, v)
+        setattr(self, cache_attr, (mtime, v))
         return v
 
     def set_download_dir(self, path):

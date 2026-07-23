@@ -61,9 +61,13 @@
                       : 'unknown';
         indicator.dataset.state = uiState;
         dot.dataset.state = uiState;
+        // A leak is a "down" but deserves a sharper label than a plain dropped
+        // tunnel — it means traffic is exposed, not just offline.
+        let downLabel = 'Tunnel down';
+        if (data.reason === 'ipv6_leak') downLabel = 'IPv6 leak';
+        else if (data.reason === 'route_leak' || data.reason === 'route_leak_v6') downLabel = 'Route leak';
         label.textContent = status === 'up' ? 'Tunnel'
-                          : status === 'down' ? 'Tunnel down'
-                          : status === 'error' ? 'Tunnel ?'
+                          : status === 'down' ? downLabel
                           : 'Tunnel ?';
 
         const lines = [];
@@ -98,6 +102,13 @@
             const mismatch = data.transmission_bound === false;
             lines.push(`Transmission bind: ${data.transmission_bind_address}`
                 + (mismatch ? ' (not the tunnel IP)' : ''));
+        }
+        if (data.host_bare_ipv6) {
+            lines.push(`Transmission bind (v6): ${data.transmission_bind_address6 || 'unset'}`
+                + (data.reason === 'ipv6_leak' ? ' (host has bare IPv6 — leak)' : ''));
+        }
+        if (data.route_egress_dev && data.route_egress_dev !== data.interface) {
+            lines.push(`Egress dev: ${data.route_egress_dev} (not the tunnel)`);
         }
         const rec = data.recovery;
         if (rec && rec.enabled && rec.last_attempt_at) {

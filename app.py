@@ -3033,6 +3033,7 @@ def _tunnel_status(iface, dump=None):
         "interface_up": False,
         "interface_exists": False,
         "interface_address": None,
+        "interface_address6": None,
         "last_handshake_seconds": None,
         "rx_bytes": None,
         "tx_bytes": None,
@@ -3052,9 +3053,14 @@ def _tunnel_status(iface, dump=None):
     info["interface_exists"] = True
     info["interface_up"] = bool(stats.isup)
     for a in addrs:
-        if a.family == socket.AF_INET:
+        if a.family == socket.AF_INET and info["interface_address"] is None:
             info["interface_address"] = a.address
-            break
+        elif a.family == socket.AF_INET6 and info["interface_address6"] is None:
+            # The tunnel's own IPv6 (skip link-local / unspecified). Used to
+            # confirm transmission is bound to it, not leaking out a bare v6.
+            addr6 = (a.address or "").split("%")[0]
+            if addr6 and not addr6.lower().startswith("fe80") and addr6 not in ("::1", "::"):
+                info["interface_address6"] = addr6
 
     if dump is None:
         dump = _wg_show_dump(iface)
@@ -3085,68 +3091,162 @@ def _transmission_bind_check(iface_addr):
     return (bind == iface_addr), bind
 
 
-def _tunnel_overall(tunnel, transmission_bound, stale_sec):
-    if not tunnel.get("interface_exists"):
-        return "down"
-    if not tunnel.get("interface_up"):
-        return "down"
-    hs = tunnel.get("last_handshake_seconds")
-    if hs is not None and hs > stale_sec:
-        return "warn"
-    if transmission_bound is False:
-        return "warn"
-    if transmission_bound is None and hs is None:
-        # Interface up but we have no live confirmation (no wg binary,
-        # no readable bind setting). Don't flip green prematurely.
-        return "unknown"
-    return "ok"
+def _route_egress_dev(dst, src):
+    """Which interface would a packet to `dst`, sourced from `src`, actually
+    leave by? Returns the device name, or None if it can't be determined
+    (no route, `src` not local, `ip` missing, or unparseable output).
+
+    This verifies the piece the bind check can't: binding transmission to the
+    tunnel IP only keeps traffic on the tunnel if packets *from* that IP are
+    routed out the tunnel interface (the policy-routing rule from the VPN
+    setup). If that rule is missing, a tunnel-sourced packet egresses the bare
+    link instead — a leak the bind alone would never catch. `ip route get`
+    is provider-agnostic: it reports the real egress dev regardless of which
+    routing table or scheme puts it there.
+    """
+    if not src:
+        return None
+    try:
+        r = subprocess.run(
+            ["ip", "route", "get", dst, "from", src],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    except Exception:
+        return None
+    # On error (e.g. "Network is unreachable") ip writes to stderr and leaves
+    # stdout empty → no dev match → None. A success line looks like:
+    #   1.1.1.1 from <src> dev mullvad table 200 ...
+    m = re.search(r"\bdev\s+(\S+)", r.stdout or "")
+    return m.group(1) if m else None
 
 
-# Cache for /api/tunnel. Each uncached probe spawns a `wg show` subprocess,
-# reads psutil interface tables, and hits the Transmission RPC (plus a
-# settings.json parse on 4.x) — pointless to redo per 10s poll tick when
-# /api/tunnel-status already caches the same signals for TUNNEL_CHECK_CACHE_TTL.
-# Probing under the lock keeps concurrent pollers from stampeding.
-_tunnel_api_cache = {"at": 0.0, "data": None}
-_tunnel_api_lock = threading.Lock()
+def _is_global_ipv6(addr):
+    """True if `addr` is a globally-routable IPv6 (2000::/3) — the kind that
+    can actually leak to the internet. Excludes link-local (fe80::/10),
+    unique-local (fc00::/7), loopback and unspecified."""
+    if not addr:
+        return False
+    a = addr.split("%")[0].strip().lower()
+    if a in ("::1", "::"):
+        return False
+    # Global unicast is 2000::/3 → first hextet starts 2xxx or 3xxx. Everything
+    # else (fe80 link-local, fc00/fd00 ULA, etc.) is not internet-routable.
+    return a[:1] in ("2", "3")
+
+
+def _host_has_bare_global_ipv6(tunnel_iface):
+    """Does any non-tunnel, non-loopback interface carry a globally-routable
+    IPv6? If so, transmission can leak v6 traffic out the bare link unless it's
+    pinned to the tunnel's own v6. Returns True/False, or None if interface
+    enumeration failed (can't tell)."""
+    try:
+        all_addrs = psutil.net_if_addrs()
+    except Exception:
+        return None
+    for ifname, addrs in all_addrs.items():
+        if ifname == tunnel_iface or ifname == "lo":
+            continue
+        for a in addrs:
+            if a.family == socket.AF_INET6 and _is_global_ipv6(a.address):
+                return True
+    return False
+
+
+def _transmission_bind6_check(iface_addr6):
+    """(bound, bind_address) for IPv6, mirroring _transmission_bind_check.
+    bound is True/False/None — None when the setting couldn't be read at all."""
+    try:
+        bind = client.get_session_bind_address_ipv6()
+    except Exception:
+        return None, None
+    if not iface_addr6:
+        # Tunnel has no IPv6 to compare against; surface the bind but don't
+        # claim bound/unbound.
+        return None, bind
+    return (bind == iface_addr6), bind
+
+
+def _ipv6_leak_check(iface, tunnel_addr6):
+    """Assess whether transmission could leak IPv6 out a bare link. The IPv4
+    bind check says nothing about IPv6, so a host with native IPv6 can leak the
+    real v6 address while the v4 indicator is green.
+
+    Returns (verdict, detail) where verdict is one of:
+      'safe'    — no bare global IPv6 on the host, or transmission is bound to
+                  the tunnel's own IPv6 and that traffic egresses the tunnel.
+      'leak'    — a bare global IPv6 exists and transmission is not pinned to
+                  the tunnel's IPv6 (unset/::, mismatched, or the tunnel has no
+                  IPv6 to bind to) → a real leak path.
+      'route'   — bound to the tunnel v6, but v6 packets from it egress a
+                  different interface (routing leak).
+      'unknown' — couldn't enumerate addresses or read the bind setting.
+    """
+    detail = {"host_bare_ipv6": None, "bind6": None, "route_egress_dev6": None}
+    host_v6 = _host_has_bare_global_ipv6(iface)
+    detail["host_bare_ipv6"] = host_v6
+    if host_v6 is None:
+        return "unknown", detail
+    if not host_v6:
+        # No globally-routable IPv6 on any bare interface → nothing to leak
+        # through, whatever transmission's v6 bind is.
+        return "safe", detail
+    bound6, bind6 = _transmission_bind6_check(tunnel_addr6)
+    detail["bind6"] = bind6
+    if bound6 is None and bind6 is None:
+        # Couldn't read the v6 bind → can't confirm it's confined.
+        return "unknown", detail
+    if not (tunnel_addr6 and bound6 is True):
+        # Bare v6 present and transmission isn't pinned to the tunnel's v6.
+        return "leak", detail
+    # Pinned to the tunnel v6 — confirm it actually routes out the tunnel.
+    route6 = _route_egress_dev("2606:4700:4700::1111", tunnel_addr6)
+    detail["route_egress_dev6"] = route6
+    if route6 is not None and route6 != iface:
+        return "route", detail
+    return "safe", detail
+
+
+# Map the authoritative _do_tunnel_check() status onto the coarse "overall"
+# the System page's tunnel panel renders. Both endpoints now share one check
+# so the panel and the topbar can never disagree (and both catch leaks).
+_STATUS_TO_OVERALL = {
+    "up": "ok",
+    "down": "down",
+    "error": "unknown",
+    "disabled": "off",
+}
 
 
 @app.route("/api/tunnel")
 @login_required
 def api_tunnel():
-    now = time.monotonic()
-    with _tunnel_api_lock:
-        cached = _tunnel_api_cache["data"]
-        if cached is not None and (now - _tunnel_api_cache["at"]) < config.TUNNEL_CHECK_CACHE_TTL:
-            return jsonify(cached)
-        iface = config.TUNNEL_IFACE
-        tunnel = _tunnel_status(iface)
-        bound, bind_addr = _transmission_bind_check(tunnel.get("interface_address"))
-        overall = _tunnel_overall(tunnel, bound, config.WG_HANDSHAKE_STALE_SEC)
-        payload = {
-            "ok": True,
-            "overall": overall,
-            "stale_after_seconds": config.WG_HANDSHAKE_STALE_SEC,
-            "transmission_bound": bound,
-            "transmission_bind_address": bind_addr,
-            **tunnel,
-        }
-        _tunnel_api_cache["at"] = now
-        _tunnel_api_cache["data"] = payload
-        return jsonify(payload)
+    data = _cached_tunnel_check()
+    return jsonify({
+        "ok": True,
+        "overall": _STATUS_TO_OVERALL.get(data.get("status"), "unknown"),
+        **data,
+    })
 
 
 # ---------- tunnel-status indicator ----------
 #
 # The visible "Tunnel" indicator must mean: transmission-daemon's outbound
-# traffic is actually flowing through the WireGuard tunnel. That requires
-# four things to hold simultaneously, all derived from live state — nothing
+# traffic is actually confined to the WireGuard tunnel. That requires all of
+# these to hold simultaneously, all derived from live state — nothing
 # hardcoded, since the tunnel IP can change every time the WG config is
 # regenerated:
 #   1. the wg binary is callable
 #   2. config.TUNNEL_IFACE exists, is up, and has an assigned IPv4
 #   3. at least one peer handshake within WG_HANDSHAKE_STALE_SEC
 #   4. transmission's bind-address-ipv4 equals the iface's current IPv4
+#   5. packets from the tunnel IPv4 actually egress the tunnel interface
+#      (the policy route is in place — a bind with no route still leaks/fails)
+#   6. no IPv6 leak: either the host has no bare global IPv6, or transmission's
+#      bind-address-ipv6 is the tunnel's IPv6 AND it egresses the tunnel
+# A green light asserts all six; any one failing is down (leak/misconfig) or
+# error (can't confirm) — never a false green.
 
 _tunnel_check_cache = {"at": 0.0, "data": None}
 _tunnel_check_lock = threading.Lock()
@@ -3169,6 +3269,7 @@ def _do_tunnel_check():
         "interface_exists": None,
         "interface_up": None,
         "interface_address": None,
+        "interface_address6": None,
         "last_handshake_seconds": None,
         "stale_after_seconds": config.WG_HANDSHAKE_STALE_SEC,
         "endpoint": None,
@@ -3176,6 +3277,10 @@ def _do_tunnel_check():
         "tx_bytes": None,
         "transmission_bound": None,
         "transmission_bind_address": None,
+        "transmission_bind_address6": None,
+        "host_bare_ipv6": None,
+        "route_egress_dev": None,
+        "route_egress_dev6": None,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "error": None,
         "cached": False,
@@ -3209,10 +3314,12 @@ def _do_tunnel_check():
     # the first failure and threw away the rest, e.g. an "interface down"
     # verdict hid the handshake age and bind address entirely.)
     tunnel_addr = info.get("interface_address")
+    tunnel_addr6 = info.get("interface_address6")
     bound, bind_addr = _transmission_bind_check(tunnel_addr)
     result["interface_exists"] = info.get("interface_exists")
     result["interface_up"] = info.get("interface_up")
     result["interface_address"] = tunnel_addr
+    result["interface_address6"] = tunnel_addr6
     result["last_handshake_seconds"] = info.get("last_handshake_seconds")
     result["endpoint"] = info.get("endpoint")
     result["rx_bytes"] = info.get("rx_bytes")
@@ -3265,6 +3372,57 @@ def _do_tunnel_check():
         result["error"] = (
             f"transmission bound to {bind_addr or '0.0.0.0'} — "
             f"not the tunnel IP {tunnel_addr}"
+        )
+        return result
+
+    # --- Beyond the IPv4 bind: verify the pieces the bind alone can't. ---
+
+    # (5) IPv4 routing. Binding to the tunnel IP only confines traffic if
+    # packets from it actually egress the tunnel; a missing policy route sends
+    # them out the bare link instead — a leak the bind check can't see.
+    route_dev = _route_egress_dev("1.1.1.1", tunnel_addr)
+    result["route_egress_dev"] = route_dev
+    if route_dev is not None and route_dev != iface:
+        result["status"] = "down"
+        result["reason"] = "route_leak"
+        result["error"] = (
+            f"packets from the tunnel IP {tunnel_addr} egress '{route_dev}', "
+            f"not the tunnel '{iface}' — routing leak (check the policy route)"
+        )
+        return result
+
+    # (6) IPv6. Everything above is IPv4-only; a host with native IPv6 can leak
+    # the real v6 address over BitTorrent while v4 looks perfect.
+    v6_verdict, v6_detail = _ipv6_leak_check(iface, tunnel_addr6)
+    result["host_bare_ipv6"] = v6_detail.get("host_bare_ipv6")
+    result["transmission_bind_address6"] = v6_detail.get("bind6")
+    result["route_egress_dev6"] = v6_detail.get("route_egress_dev6")
+    if v6_verdict == "leak":
+        result["status"] = "down"
+        result["reason"] = "ipv6_leak"
+        result["error"] = (
+            "IPv6 leak: the host has a global IPv6 address but transmission's "
+            f"bind-address-ipv6 ({v6_detail.get('bind6') or 'unset'}) is not the "
+            f"tunnel's IPv6 ({tunnel_addr6 or 'none'}). Set bind-address-ipv6 to "
+            "the tunnel's IPv6 or disable IPv6 on the host."
+        )
+        return result
+    if v6_verdict == "route":
+        result["status"] = "down"
+        result["reason"] = "route_leak_v6"
+        result["error"] = (
+            f"IPv6 packets from the tunnel address {tunnel_addr6} egress "
+            f"'{v6_detail.get('route_egress_dev6')}', not the tunnel '{iface}'"
+        )
+        return result
+    if v6_verdict == "unknown":
+        # Bare v6 may be present but we couldn't read the v6 bind or enumerate
+        # addresses — can't confirm v6 is confined, so don't flip green.
+        result["status"] = "error"
+        result["reason"] = "ipv6_unverifiable"
+        result["error"] = (
+            "could not verify IPv6 is confined to the tunnel "
+            "(bind-address-ipv6 unreadable or interface enumeration failed)"
         )
         return result
 
