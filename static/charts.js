@@ -494,33 +494,79 @@
     const sep = segs.length > 1
       ? ` stroke="${cssVar('--panel')}" stroke-width="1.5" stroke-linejoin="round"` : '';
     let a0 = -Math.PI / 2, marks = '';
-    segs.forEach(s => {
+    segs.forEach((s, i) => {
       const frac = s.value / total;
       const c = cssVar(s.color);
       if (frac >= 0.999) {
         // A lone slice can't be drawn as an arc (start == end) — draw the
         // whole circle instead.
-        marks += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${c}"${sep}>` +
-          `<title>${esc(s.label)} — ${esc(fmtV(s.value))}</title></circle>`;
+        marks += `<circle class="pie-slice" data-i="${i}" cx="${cx}" cy="${cy}" r="${r}" fill="${c}"${sep}/>`;
       } else {
         const a1 = a0 + frac * 2 * Math.PI;
         const x0 = (cx + r * Math.cos(a0)).toFixed(2), y0 = (cy + r * Math.sin(a0)).toFixed(2);
         const x1 = (cx + r * Math.cos(a1)).toFixed(2), y1 = (cy + r * Math.sin(a1)).toFixed(2);
         const large = frac > 0.5 ? 1 : 0;
-        marks += `<path d="M${cx} ${cy} L${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1} Z" ` +
-          `fill="${c}"${sep}><title>${esc(s.label)} — ${esc(fmtV(s.value))}</title></path>`;
+        marks += `<path class="pie-slice" data-i="${i}" d="M${cx} ${cy} L${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1} Z" fill="${c}"${sep}/>`;
         a0 = a1;
       }
     });
 
-    const legend = `<div class="chart-legend pie-legend">` + segs.map(s =>
-      `<span class="pie-legend-row" title="${esc(s.label)} — ${esc(fmtV(s.value))}">` +
+    const legend = `<div class="chart-legend pie-legend">` + segs.map((s, i) =>
+      `<span class="pie-legend-row" data-i="${i}">` +
       `<span class="chart-swatch" style="background:${cssVar(s.color)}"></span>` +
       `<span class="pie-legend-name">${esc(s.label)}</span>` +
       `<span class="pie-legend-val">${esc(fmtV(s.value))}</span></span>`
     ).join('') + `</div>`;
-    el.innerHTML = `<div class="donut-wrap"><svg viewBox="0 0 ${size} ${size}" class="chart-svg donut" role="img" ` +
-      `aria-label="${esc(segs.map(s => s.label + ' ' + fmtV(s.value)).join(', '))}">${marks}</svg>${legend}</div>`;
+    el.innerHTML = `<div class="donut-wrap"><div class="chart-plot pie-plot">` +
+      `<svg viewBox="0 0 ${size} ${size}" class="chart-svg donut" role="img" ` +
+      `aria-label="${esc(segs.map(s => s.label + ' ' + fmtV(s.value)).join(', '))}">${marks}</svg>` +
+      `<div class="chart-tip" hidden></div></div>${legend}</div>`;
+
+    // ---- hover / touch: highlight a slice + its legend row, show a readout ----
+    // Hovering either the wedge or the legend row lights up the pair, so the
+    // pie is legible without hunting for the matching color.
+    const plot = el.querySelector('.pie-plot');
+    const tip = el.querySelector('.chart-tip');
+    const slices = el.querySelectorAll('.pie-slice');
+    const legRows = el.querySelectorAll('.pie-legend-row');
+    let hotI = -1;
+    function setHot(i) {
+      if (i === hotI) return;
+      hotI = i;
+      plot.classList.toggle('has-hot', i >= 0);
+      slices.forEach(n => n.classList.toggle('is-hot', +n.dataset.i === i));
+      legRows.forEach(n => n.classList.toggle('is-hot', +n.dataset.i === i));
+      if (i >= 0) {
+        const s = segs[i];
+        const pct = (s.value / total) * 100;
+        tip.innerHTML = `<div class="chart-tip-row"><span class="chart-swatch" style="background:${cssVar(s.color)}"></span>` +
+          `<span class="chart-tip-name">${esc(s.label)}</span></div>` +
+          `<div class="chart-tip-sub">${esc(fmtV(s.value))} · ${pct.toFixed(pct < 10 ? 1 : 0)}%</div>`;
+        tip.hidden = false;
+      } else {
+        tip.hidden = true;
+      }
+    }
+    function place(ev) {
+      const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
+      const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      const pr = plot.getBoundingClientRect();
+      let left = clientX - pr.left + 12;
+      if (left + 150 > pr.width) left = clientX - pr.left - 158;
+      tip.style.left = Math.max(0, left) + 'px';
+      tip.style.top = Math.max(0, clientY - pr.top + 12) + 'px';
+    }
+    slices.forEach(n => {
+      n.addEventListener('pointerenter', () => setHot(+n.dataset.i));
+      n.addEventListener('pointermove', place);
+      n.addEventListener('touchstart', ev => { setHot(+n.dataset.i); place(ev); }, { passive: true });
+    });
+    legRows.forEach(n => {
+      n.addEventListener('pointerenter', () => setHot(+n.dataset.i));
+    });
+    plot.addEventListener('pointerleave', () => setHot(-1));
+    plot.addEventListener('touchend', () => setHot(-1));
+    el.querySelector('.pie-legend').addEventListener('pointerleave', () => setHot(-1));
   }
 
   window.Charts = { sparkline, areaLines, barsH, bars, barsTime, donut, pie };

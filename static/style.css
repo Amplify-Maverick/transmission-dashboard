@@ -2868,6 +2868,16 @@ body.checking .torrent-list { padding-bottom: 96px; }
     white-space: nowrap;
 }
 
+/* pie hover: light up the aimed slice + its legend row, dim the rest */
+.pie-slice { cursor: pointer; transition: opacity 0.12s ease; }
+.pie-plot.has-hot .pie-slice:not(.is-hot) { opacity: 0.32; }
+.pie-legend-row { cursor: default; }
+.pie-legend-row.is-hot .pie-legend-name,
+.pie-legend-row.is-hot .pie-legend-val { color: var(--text-strong); }
+.pie-plot .chart-tip { max-width: 240px; }
+.pie-plot .chart-tip-name { white-space: normal; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .pie-slice { transition: none; } }
+
 /* total sits above the pie rather than in its center */
 .upload-share-total { margin: 2px 0 12px; display: flex; align-items: baseline; gap: 8px; }
 .upload-share-total-value {
