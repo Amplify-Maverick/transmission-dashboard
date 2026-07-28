@@ -475,5 +475,53 @@
       `aria-label="${esc(segs.map(s => s.label + ' ' + fmtV(s.value)).join(', '))}">${arcs}${center}</svg>${legend}</div>`;
   }
 
-  window.Charts = { sparkline, areaLines, barsH, bars, barsTime, donut };
+  // ---- pie: solid categorical mix with an aligned-column legend ----
+  // Like donut() but filled to the center, and the legend is a real table
+  // (swatch · name · value) so the value column lines up down the rows.
+  // segments: [{ label, value, color:'--green' }]
+  function pie(el, segments, opts) {
+    opts = opts || {};
+    const size = opts.size || 132;
+    const r = size / 2, cx = size / 2, cy = size / 2;
+    clearEl(el);
+    const segs = (segments || []).filter(s => s && s.value > 0);
+    const total = segs.reduce((a, s) => a + s.value, 0);
+    const fmtV = opts.fmtValue || (v => String(v));
+    if (!total) { el.innerHTML = `<div class="chart-empty">No data</div>`; return; }
+
+    // A hairline of the surface color between wedges reads as a clean gap
+    // without the spokes a radial gap would draw to the center.
+    const sep = segs.length > 1
+      ? ` stroke="${cssVar('--panel')}" stroke-width="1.5" stroke-linejoin="round"` : '';
+    let a0 = -Math.PI / 2, marks = '';
+    segs.forEach(s => {
+      const frac = s.value / total;
+      const c = cssVar(s.color);
+      if (frac >= 0.999) {
+        // A lone slice can't be drawn as an arc (start == end) — draw the
+        // whole circle instead.
+        marks += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${c}"${sep}>` +
+          `<title>${esc(s.label)} — ${esc(fmtV(s.value))}</title></circle>`;
+      } else {
+        const a1 = a0 + frac * 2 * Math.PI;
+        const x0 = (cx + r * Math.cos(a0)).toFixed(2), y0 = (cy + r * Math.sin(a0)).toFixed(2);
+        const x1 = (cx + r * Math.cos(a1)).toFixed(2), y1 = (cy + r * Math.sin(a1)).toFixed(2);
+        const large = frac > 0.5 ? 1 : 0;
+        marks += `<path d="M${cx} ${cy} L${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1} Z" ` +
+          `fill="${c}"${sep}><title>${esc(s.label)} — ${esc(fmtV(s.value))}</title></path>`;
+        a0 = a1;
+      }
+    });
+
+    const legend = `<div class="chart-legend pie-legend">` + segs.map(s =>
+      `<span class="pie-legend-row" title="${esc(s.label)} — ${esc(fmtV(s.value))}">` +
+      `<span class="chart-swatch" style="background:${cssVar(s.color)}"></span>` +
+      `<span class="pie-legend-name">${esc(s.label)}</span>` +
+      `<span class="pie-legend-val">${esc(fmtV(s.value))}</span></span>`
+    ).join('') + `</div>`;
+    el.innerHTML = `<div class="donut-wrap"><svg viewBox="0 0 ${size} ${size}" class="chart-svg donut" role="img" ` +
+      `aria-label="${esc(segs.map(s => s.label + ' ' + fmtV(s.value)).join(', '))}">${marks}</svg>${legend}</div>`;
+  }
+
+  window.Charts = { sparkline, areaLines, barsH, bars, barsTime, donut, pie };
 })();

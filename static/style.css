@@ -2841,14 +2841,48 @@ body.checking .torrent-list { padding-bottom: 96px; }
 .donut-sub { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
 .donut-legend { flex-direction: column; gap: 6px; margin-top: 0; }
 
-/* Uploaded-by-torrent pie: torrent names are long, so let the legend claim
-   the row's leftover width and wrap instead of pushing past the card edge. */
-#chart-uploaded-share .donut-legend { flex: 1 1 180px; min-width: 0; }
-#chart-uploaded-share .donut-legend .chart-legend-item {
+/* pie legend: a real swatch · name · value table so the value column lines
+   up down every row. display:contents on the row lets its three cells fall
+   into the parent grid's shared tracks. */
+.pie-legend {
+    flex: 1 1 200px;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) max-content;
     align-items: baseline;
-    overflow-wrap: anywhere;
+    column-gap: 10px;
+    row-gap: 7px;
 }
-#chart-uploaded-share .donut-legend .chart-swatch { flex-shrink: 0; }
+.pie-legend-row { display: contents; }
+.pie-legend .chart-swatch { align-self: center; flex-shrink: 0; }
+.pie-legend-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pie-legend-val {
+    font-family: var(--mono);
+    color: var(--muted);
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* total sits above the pie rather than in its center */
+.upload-share-total { margin: 2px 0 12px; display: flex; align-items: baseline; gap: 8px; }
+.upload-share-total-value {
+    font-size: 26px;
+    font-weight: 600;
+    font-family: var(--mono);
+    color: var(--text-strong);
+    line-height: 1;
+}
+.upload-share-total-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--muted);
+}
 
 /* distribution multi-chart grid */
 .dist-grid {

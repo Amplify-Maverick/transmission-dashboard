@@ -82,7 +82,13 @@
 
                     <div class="stats-body">
                         <h3 class="stats-section-title stats-body-hof-title">Uploaded by torrent</h3>
-                        <div class="chart-box stats-body-hof" id="chart-uploaded-share"></div>
+                        <div class="stats-body-hof">
+                            <div class="upload-share-total">
+                                <span class="upload-share-total-value" id="upload-share-total">—</span>
+                                <span class="upload-share-total-label">uploaded</span>
+                            </div>
+                            <div class="chart-box" id="chart-uploaded-share"></div>
+                        </div>
 
                         <h3 class="stats-section-title stats-body-top-title">Top seeded</h3>
                         <ol class="stats-top-list stats-body-top" id="top-uploaders">
@@ -784,24 +790,23 @@
                               '--series-4', '--green', '--red', '--series-1'];
         function renderUploadedShare(data) {
             const el = document.getElementById('chart-uploaded-share');
+            const totalEl = document.getElementById('upload-share-total');
             if (!el || !window.Charts) return;
             const rows = ((data.distribution || {}).uploaded_by_torrent) || [];
             if (!rows.length) {
+                if (totalEl) totalEl.textContent = '';
                 el.innerHTML = '<div class="chart-empty">Nothing uploaded yet</div>';
                 return;
             }
             const total = rows.reduce((a, r) => a + (r.bytes || 0), 0);
+            if (totalEl) totalEl.textContent = fmtBytes(total);
             let ci = 0;
             const segs = rows.map(r => ({
                 label: r.label,
                 value: r.bytes,
                 color: r.other ? '--grey' : SHARE_COLORS[ci++ % SHARE_COLORS.length],
             }));
-            Charts.donut(el, segs, {
-                centerLabel: fmtBytes(total),
-                centerSub: 'uploaded',
-                fmtValue: fmtBytes,
-            });
+            Charts.pie(el, segs, { fmtValue: fmtBytes });
         }
 
         function renderTopUploaders(list) {
