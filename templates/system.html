@@ -81,17 +81,8 @@
                     </div>
 
                     <div class="stats-body">
-                        <h3 class="stats-section-title stats-body-hof-title">Hall of fame</h3>
-                        <dl class="stats-superlatives stats-body-hof">
-                            <dt>Biggest torrent</dt>
-                            <dd id="sup-biggest">—</dd>
-                            <dt>Longest seeder</dt>
-                            <dd id="sup-longest">—</dd>
-                            <dt>Best ratio</dt>
-                            <dd id="sup-best-ratio">—</dd>
-                            <dt>Oldest torrent</dt>
-                            <dd id="sup-oldest">—</dd>
-                        </dl>
+                        <h3 class="stats-section-title stats-body-hof-title">Uploaded by torrent</h3>
+                        <div class="chart-box stats-body-hof" id="chart-uploaded-share"></div>
 
                         <h3 class="stats-section-title stats-body-top-title">Top seeded</h3>
                         <ol class="stats-top-list stats-body-top" id="top-uploaders">
@@ -781,16 +772,36 @@
             if (el) el.textContent = value;
         }
 
-        function superlativeText(s, valueFormatter) {
-            if (!s || !s.name) return '—';
-            const val = valueFormatter(s.value);
-            return val ? `${s.name} — ${val}` : s.name;
-        }
-
         function escapeHtml(s) {
             return String(s == null ? '' : s)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // Distinct-enough hues for the uploaded-share pie; the "Other" wedge
+        // always takes neutral grey so the tail reads as a catch-all.
+        const SHARE_COLORS = ['--series-2', '--series-3', '--series-5', '--blue',
+                              '--series-4', '--green', '--red', '--series-1'];
+        function renderUploadedShare(data) {
+            const el = document.getElementById('chart-uploaded-share');
+            if (!el || !window.Charts) return;
+            const rows = ((data.distribution || {}).uploaded_by_torrent) || [];
+            if (!rows.length) {
+                el.innerHTML = '<div class="chart-empty">Nothing uploaded yet</div>';
+                return;
+            }
+            const total = rows.reduce((a, r) => a + (r.bytes || 0), 0);
+            let ci = 0;
+            const segs = rows.map(r => ({
+                label: r.label,
+                value: r.bytes,
+                color: r.other ? '--grey' : SHARE_COLORS[ci++ % SHARE_COLORS.length],
+            }));
+            Charts.donut(el, segs, {
+                centerLabel: fmtBytes(total),
+                centerSub: 'uploaded',
+                fmtValue: fmtBytes,
+            });
         }
 
         function renderTopUploaders(list) {
@@ -849,20 +860,7 @@
             setText('stat-mix',
                 `${mix.seeding || 0} seed · ${mix.downloading || 0} down · ${mix.paused || 0} paused`);
 
-            const bytesValue = v => v ? fmtBytes(v) : '';
-            const ratioValue = v => v ? `ratio ${fmtRatio(v)}` : '';
-            const timeValue = v => v ? `${fmtDuration(v)}` : '';
-            const dateValue = v => {
-                if (!v || v <= 0) return '';
-                const d = new Date(v * 1000);
-                if (isNaN(d.getTime())) return '';
-                const days = Math.floor((Date.now() / 1000 - v) / 86400);
-                return days > 0 ? `${d.toLocaleDateString()} (${days}d ago)` : d.toLocaleDateString();
-            };
-            setText('sup-biggest', superlativeText(sup.biggest, bytesValue));
-            setText('sup-longest', superlativeText(sup.longest_seeder, timeValue));
-            setText('sup-best-ratio', superlativeText(sup.best_ratio, ratioValue));
-            setText('sup-oldest', superlativeText(sup.oldest, dateValue));
+            renderUploadedShare(data);
             renderTopUploaders(sup.top_uploaders);
 
             const copyDone = hist.copies_done || 0;

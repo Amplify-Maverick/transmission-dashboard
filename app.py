@@ -2602,8 +2602,12 @@ def _torrent_distribution(torrents):
     ratio_counts = [0] * len(_RATIO_BUCKETS)
     size_counts = [0] * len(_SIZE_BUCKETS)
     by_label = {}
+    uploaded = []
     for t in torrents:
         size = int(t.get("totalSize") or 0)
+        up = int(t.get("uploadedEver") or 0)
+        if up > 0:
+            uploaded.append({"label": t.get("name") or "—", "bytes": up})
         for i, (_, lo, hi) in enumerate(_SIZE_BUCKETS):
             if lo <= size < hi:
                 size_counts[i] += 1
@@ -2626,6 +2630,19 @@ def _torrent_distribution(torrents):
          for k, v in by_label.items()),
         key=lambda d: d["bytes"], reverse=True,
     )[:8]
+    # Uploaded-bytes breakdown per torrent for the pie: the top slices stay
+    # individual and the long tail collapses into one "Other" wedge, so a
+    # library of hundreds of torrents still reads as a handful of segments.
+    uploaded.sort(key=lambda d: d["bytes"], reverse=True)
+    UP_TOP = 8
+    uploaded_by_torrent = uploaded[:UP_TOP]
+    if len(uploaded) > UP_TOP:
+        rest = uploaded[UP_TOP:]
+        uploaded_by_torrent = uploaded_by_torrent + [{
+            "label": f"Other ({len(rest)} torrents)",
+            "bytes": sum(d["bytes"] for d in rest),
+            "other": True,
+        }]
     return {
         "ratio_buckets": [
             {"label": _RATIO_BUCKETS[i][0], "count": n}
@@ -2636,6 +2653,7 @@ def _torrent_distribution(torrents):
             for i, n in enumerate(size_counts)
         ],
         "by_label": label_list,
+        "uploaded_by_torrent": uploaded_by_torrent,
     }
 
 
