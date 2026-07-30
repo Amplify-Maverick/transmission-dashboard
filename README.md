@@ -593,9 +593,16 @@ How it behaves:
   can't be resumed, so it isn't left in the output directory. The same applies
   to a rip interrupted by a dashboard restart, which is reconciled at startup
   and logged to the Events page.
-- Finished rips are listed on the tab and recorded in the `rip_history` table.
-  They are written locally; copying them to the media server is a separate
-  step (the copy pipeline works on torrents, not rips).
+- Finished rips are recorded in the `rip_history` table and listed on the tab.
+
+The page is two columns: the drive and rip settings on the left, and every
+finished file on the right as a card (size, source disc, preset, runtime).
+Each card can copy its file to the media server over SSH — same host, folders,
+bandwidth limit, free-space margin and library refresh as the torrent copy
+feature, configured once in **Settings → Media server**. Pick a library folder
+and hit **Copy**; progress, cancellation and failures show on the card, and a
+successful copy is verified on the remote before it's marked done. Files are
+never deleted locally, so re-copying is always safe.
 
 Settings live on the tab itself (output directory, default preset, container,
 nice level, minimum title length, concurrency, eject-when-done) and persist to
@@ -643,6 +650,7 @@ secrets or machine-specific state:
 | `copy_state.json` | In-progress/last copy state | Runtime state, auto-created |
 | `scan_state.json` | Media-scan progress state | Runtime state, auto-created |
 | `rip_state.json` | In-progress/last DVD rip state | Runtime state, auto-created |
+| `rip_copy_state.json` | In-progress/last rip-to-media-server copy | Runtime state, auto-created |
 | `deploy.sh` | Your personal rsync-deploy script | Contains your server host |
 | `.venv/`, `__pycache__/`, `*.pyc` | Python virtualenv / bytecode | Build artifacts |
 

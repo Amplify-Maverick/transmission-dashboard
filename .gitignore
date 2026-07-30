@@ -13,6 +13,7 @@ app_config.json
 copy_state.json
 scan_state.json
 rip_state.json
+rip_copy_state.json
 
 # Personal deployment script (ship deploy.sh.example instead)
 deploy.sh

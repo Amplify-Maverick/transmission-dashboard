@@ -36,8 +36,8 @@
         </div>
     </header>
 
-    <main class="settings-page">
-        <div class="settings-container">
+    <main class="rips-page">
+        <div class="rips-container">
 
             <div class="form-error" id="rip-error" hidden></div>
 
@@ -57,7 +57,9 @@
                 <p class="field-hint">Looked for: <code id="rip-cli-path">HandBrakeCLI</code></p>
             </section>
 
-            <div id="rip-main" hidden>
+            <div id="rip-main" class="rips-layout" hidden>
+              <!-- Left column: the drive, encode options and rip history. -->
+              <div class="rips-col">
                 <section class="settings-section">
                     <header class="settings-section-header">
                         <h2 class="settings-section-title">Optical drives</h2>
@@ -149,9 +151,64 @@
                     <div id="rip-history"></div>
                     <p class="field-hint" id="rip-history-empty" hidden>No rips yet.</p>
                 </section>
+              </div>
+
+              <!-- Right column: the finished files, and shipping them out. -->
+              <div class="rips-col">
+                <section class="settings-section">
+                    <header class="settings-section-header">
+                        <h2 class="settings-section-title">Ripped files</h2>
+                        <p class="settings-section-hint" id="rip-files-hint">
+                            Everything in the output directory. Pick a library folder
+                            to copy a file to the media server over SSH.
+                        </p>
+                    </header>
+                    <div class="form-error" id="rip-files-error" hidden></div>
+                    <div class="rip-files" id="rip-files"></div>
+                    <p class="field-hint" id="rip-files-empty" hidden>
+                        No files yet — finished rips appear here.
+                    </p>
+                </section>
+              </div>
             </div>
         </div>
     </main>
+
+    <!-- One card per finished file, cloned by rips.js. Reuses the torrent
+         card classes so both pages read the same. -->
+    <template id="rip-file-template">
+        <article class="card rip-file" data-path="">
+            <div class="card-header">
+                <div class="card-body">
+                    <div class="card-top">
+                        <span class="card-name" data-field="name"></span>
+                        <span class="status-pill" data-field="pill" hidden></span>
+                    </div>
+                    <div class="progress" data-field="progress" hidden>
+                        <div class="progress-fill" data-field="fill"></div>
+                    </div>
+                    <div class="card-error" data-field="error-box" hidden>
+                        <span class="card-error-tag">copy</span>
+                        <span class="card-error-msg" data-field="error-msg"></span>
+                    </div>
+                    <div class="card-meta">
+                        <span class="meta-item"><span class="meta-label">size</span><span class="meta-value" data-field="size"></span></span>
+                        <span class="meta-item"><span class="meta-label">ripped</span><span class="meta-value" data-field="when"></span></span>
+                        <span class="meta-item" data-meta="runtime" hidden><span class="meta-label">runtime</span><span class="meta-value" data-field="runtime"></span></span>
+                        <span class="meta-item" data-meta="disc" hidden><span class="meta-label">disc</span><span class="meta-value" data-field="disc"></span></span>
+                        <span class="meta-item" data-meta="preset" hidden><span class="meta-label">preset</span><span class="meta-value" data-field="preset"></span></span>
+                        <span class="meta-item" data-meta="copyrate" hidden><span class="meta-label">rate</span><span class="meta-value" data-field="rate"></span></span>
+                        <span class="meta-item" data-meta="copyeta" hidden><span class="meta-label">eta</span><span class="meta-value" data-field="eta"></span></span>
+                    </div>
+                    <div class="rip-file-actions">
+                        <select data-field="folder" aria-label="Destination folder"></select>
+                        <button type="button" class="btn btn-sm btn-primary" data-action="copy">Copy</button>
+                        <button type="button" class="btn btn-sm btn-danger" data-action="cancel" hidden>Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </article>
+    </template>
 
     <!-- One card per optical drive, cloned by rips.js. -->
     <template id="rip-drive-template">

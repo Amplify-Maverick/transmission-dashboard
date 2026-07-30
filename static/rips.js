@@ -609,6 +609,189 @@
         });
     }
 
+    // ---------- ripped files (right column) ----------
+
+    const filesEl = document.getElementById('rip-files');
+    const filesEmptyEl = document.getElementById('rip-files-empty');
+    const filesErrorEl = document.getElementById('rip-files-error');
+    const filesHintEl = document.getElementById('rip-files-hint');
+    const fileTemplate = document.getElementById('rip-file-template');
+
+    let mediaInfo = { configured: false, folders: [] };
+    // path -> folder the user picked, so a poll doesn't reset the dropdown.
+    const folderChoice = new Map();
+
+    function fileCardFor(path) {
+        let card = filesEl.querySelector(`.rip-file[data-path="${CSS.escape(path)}"]`);
+        if (card) return card;
+        card = fileTemplate.content.firstElementChild.cloneNode(true);
+        card.dataset.path = path;
+        wireFileCard(card, path);
+        filesEl.appendChild(card);
+        return card;
+    }
+
+    function wireFileCard(card, path) {
+        field(card, 'folder').addEventListener('change', (e) => {
+            folderChoice.set(path, e.currentTarget.value);
+        });
+        card.querySelector('[data-action="copy"]').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            showError(filesErrorEl, '');
+            try {
+                const res = await postJSON('/api/rip/files/copy', {
+                    path,
+                    folder: field(card, 'folder').value,
+                });
+                toast(`Copying to ${res.folder}`);
+                refreshFiles();
+            } catch (err) {
+                showError(filesErrorEl, err.message);
+                toast(err.message, 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        });
+        card.querySelector('[data-action="cancel"]').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            try {
+                await postJSON('/api/rip/files/copy/stop', { path });
+                toast('Cancelling copy…');
+            } catch (err) {
+                toast(err.message, 'error');
+            } finally {
+                btn.disabled = false;
+                refreshFiles();
+            }
+        });
+    }
+
+    function fillFolderSelect(select, path) {
+        const wanted = folderChoice.get(path) || select.value;
+        const current = Array.from(select.options).map(o => o.value).join('|');
+        if (current !== mediaInfo.folders.join('|')) {
+            select.textContent = '';
+            mediaInfo.folders.forEach(name => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                select.appendChild(opt);
+            });
+        }
+        if (wanted && mediaInfo.folders.includes(wanted)) select.value = wanted;
+    }
+
+    // Copy states that shouldn't offer another Copy click.
+    const COPY_BUSY = 'copying';
+
+    function updateFileCard(card, f) {
+        const copy = f.copy || {};
+        const busy = !!copy.active || copy.status === COPY_BUSY;
+
+        field(card, 'name').textContent = f.name;
+        field(card, 'size').textContent = fmtBytes(f.size);
+        field(card, 'when').textContent = fmtWhen(f.modified);
+
+        setMeta(card, 'runtime', f.duration_seconds ? fmtDuration(f.duration_seconds) : null);
+        setMeta(card, 'disc', f.disc_label);
+        setMeta(card, 'preset', f.preset);
+        setMeta(card, 'copyrate', busy ? copy.rate : null);
+        setMeta(card, 'copyeta', busy && copy.eta_seconds != null
+            ? fmtDuration(copy.eta_seconds) : null);
+
+        const pill = field(card, 'pill');
+        const label = copyPill(copy, busy);
+        pill.hidden = !label;
+        if (label) {
+            pill.textContent = label.text;
+            // data-status on the card drives the accent bar, pill colour and
+            // progress-fill colour through the shared torrent-card rules.
+            card.dataset.status = label.state;
+        } else {
+            delete card.dataset.status;
+        }
+
+        const bar = field(card, 'progress');
+        bar.hidden = !busy;
+        if (busy) {
+            const pct = Math.min(100, Math.max(0, copy.percent || 0));
+            field(card, 'fill').style.width = `${pct}%`;
+        }
+
+        const errBox = field(card, 'error-box');
+        const failed = ['error', 'interrupted'].includes(copy.status) && copy.error_message;
+        errBox.hidden = !failed;
+        if (failed) field(card, 'error-msg').textContent = copy.error_message;
+
+        const select = field(card, 'folder');
+        const copyBtn = card.querySelector('[data-action="copy"]');
+        const cancelBtn = card.querySelector('[data-action="cancel"]');
+        fillFolderSelect(select, f.path);
+        select.disabled = busy || !mediaInfo.configured;
+        copyBtn.hidden = busy;
+        copyBtn.disabled = !mediaInfo.configured || !mediaInfo.folders.length;
+        // A file already on the server can still be re-sent (e.g. after
+        // changing library folders) — rsync skips it if it's identical.
+        copyBtn.textContent = copy.status === 'done' ? 'Copy again' : 'Copy';
+        cancelBtn.hidden = !busy;
+    }
+
+    function setMeta(card, name, value) {
+        const el = card.querySelector(`[data-meta="${name}"]`);
+        if (!el) return;
+        el.hidden = !value;
+        if (value) field(el, name === 'copyrate' ? 'rate'
+            : name === 'copyeta' ? 'eta' : name).textContent = value;
+    }
+
+    // States map onto the torrent-card status vocabulary so the colours match
+    // the Torrents page: blue in flight, green complete, grey stopped.
+    function copyPill(copy, busy) {
+        if (busy) return { text: 'copying', state: 'downloading' };
+        switch (copy.status) {
+            case 'done': return { text: 'on media server', state: 'seeding' };
+            case 'error': return { text: 'copy failed', state: 'failed' };
+            case 'cancelled': return { text: 'copy cancelled', state: 'paused' };
+            case 'interrupted': return { text: 'copy interrupted', state: 'failed' };
+            default: return null;
+        }
+    }
+
+    async function refreshFiles() {
+        let data;
+        try {
+            data = await api('/api/rip/files');
+        } catch (err) {
+            showError(filesErrorEl, err.message);
+            return;
+        }
+        mediaInfo = data.media || { configured: false, folders: [] };
+        if (!mediaInfo.configured) {
+            filesHintEl.textContent = 'Everything in the output directory. Configure a '
+                + 'media server in Settings to copy files to it.';
+        } else {
+            filesHintEl.textContent = `Everything in the output directory. Copy to `
+                + `${mediaInfo.host} over SSH.`;
+        }
+
+        const files = data.files || [];
+        filesEmptyEl.hidden = files.length > 0;
+        const seen = new Set();
+        files.forEach(f => {
+            seen.add(f.path);
+            updateFileCard(fileCardFor(f.path), f);
+        });
+        filesEl.querySelectorAll('.rip-file').forEach(card => {
+            if (!seen.has(card.dataset.path)) card.remove();
+        });
+        // Keep the newest first, matching the API's order.
+        files.forEach(f => filesEl.appendChild(fileCardFor(f.path)));
+
+        return files.some(f => (f.copy || {}).active);
+    }
+
     // ---------- polling ----------
 
     function schedule(ms) {
@@ -671,6 +854,9 @@
             if (!seen.has(card.dataset.device)) card.remove();
         });
 
+        // The file list carries live copy progress, so it rides the same tick.
+        const copying = await refreshFiles();
+
         const anyActive = drives.some(d => d.job && d.job.active)
             || drives.some(d => d.scan && d.scan.status === 'scanning');
         // Refresh the history list once each time everything goes quiet.
@@ -680,7 +866,7 @@
         }
         if (anyActive) historyDirty = true;
 
-        schedule(anyActive ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+        schedule(anyActive || copying ? POLL_ACTIVE_MS : POLL_IDLE_MS);
     }
 
     async function init() {

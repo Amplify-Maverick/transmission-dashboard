@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -6483,15 +6484,434 @@ def _human_bytes(n):
     return f"{n:.1f} TB"
 
 
+# ---------- copying finished rips to the media server ----------
+#
+# Separate from the torrent copy pipeline: that one is keyed by Transmission
+# id and carries torrent-specific concerns (hashes, labels, season grouping,
+# copy_history rows). A rip is just a file on disk, so it gets its own state
+# keyed by absolute path — but it reuses the same media_config.json
+# destination, SSH transport, free-space margin rules and library refresh, so
+# there is one place to configure a media server.
+
+RIP_COPY_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rip_copy_state.json")
+
+# Only files the ripper could have produced are listed or copyable.
+_RIP_VIDEO_EXTS = (".mkv", ".mp4", ".m4v")
+
+_rip_copy_state_lock = threading.Lock()
+_rip_copy_state_cache = None
+_rip_copy_state_last_flush = 0.0
+
+# path -> {"cancel": Event, "proc": Popen|None}
+_active_rip_copies = {}
+_active_rip_copies_lock = threading.Lock()
+
+
+def _load_rip_copy_state_from_disk():
+    if not os.path.exists(RIP_COPY_STATE_FILE):
+        return {}
+    try:
+        with open(RIP_COPY_STATE_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _ensure_rip_copy_state_cache_unlocked():
+    global _rip_copy_state_cache
+    if _rip_copy_state_cache is None:
+        _rip_copy_state_cache = _load_rip_copy_state_from_disk()
+    return _rip_copy_state_cache
+
+
+def load_rip_copy_state():
+    with _rip_copy_state_lock:
+        cache = _ensure_rip_copy_state_cache_unlocked()
+        return {k: dict(v) for k, v in cache.items()}
+
+
+def update_rip_copy_entry(path, _persist=True, _replace=False, **fields):
+    """Merge fields into a file's copy-state entry, keyed by source path."""
+    global _rip_copy_state_last_flush
+    with _rip_copy_state_lock:
+        state = _ensure_rip_copy_state_cache_unlocked()
+        entry = {} if _replace else dict(state.get(path) or {})
+        entry.update(fields)
+        entry["path"] = path
+        state[path] = entry
+        now = time.monotonic()
+        if _persist or (now - _rip_copy_state_last_flush) >= _COPY_STATE_FLUSH_MIN_INTERVAL:
+            _atomic_write_json(RIP_COPY_STATE_FILE, state)
+            _rip_copy_state_last_flush = now
+        return dict(entry)
+
+
+def _reconcile_interrupted_rip_copies():
+    """Mark copies orphaned by a restart as interrupted.
+
+    Unlike a partial rip, a partial copy is worth keeping: rsync --partial
+    means retrying resumes from where it stopped, so nothing is deleted here.
+    """
+    state = load_rip_copy_state()
+    stale = [p for p, e in state.items() if e.get("status") == "copying"]
+    for path in stale:
+        update_rip_copy_entry(
+            path, status="interrupted", finished_at=_now_iso(),
+            error_message="dashboard restarted while copying")
+    return stale
+
+
+def _rip_files():
+    """Finished rips on disk, newest first, enriched with history + copy state.
+
+    The directory is the source of truth rather than rip_history: a file can
+    be removed by hand, and a row can outlive its file. History only supplies
+    the extra detail (source disc, preset, encode length).
+    """
+    settings = _rip_settings()
+    root = settings["output_dir"]
+    copies = load_rip_copy_state()
+    history = {}
+    try:
+        for row in db.list_rips(200):
+            if row.get("output_path") and row["output_path"] not in history:
+                history[row["output_path"]] = row
+    except Exception:
+        history = {}
+
+    out = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    for name in names:
+        if not name.lower().endswith(_RIP_VIDEO_EXTS):
+            continue
+        full = os.path.join(root, name)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        if not os.path.isfile(full):
+            continue
+        row = history.get(full) or {}
+        copy = copies.get(full) or {}
+        with _active_rip_copies_lock:
+            copy["active"] = full in _active_rip_copies
+        out.append({
+            "name": name,
+            "path": full,
+            "size": st.st_size,
+            "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+            "disc_label": row.get("disc_label"),
+            "preset": row.get("preset"),
+            "title_index": row.get("title_index"),
+            "duration_seconds": row.get("duration_seconds") or 0,
+            "copy": copy,
+        })
+    out.sort(key=lambda f: f["modified"], reverse=True)
+    return out
+
+
+def _resolve_rip_file(path):
+    """Validate a client-supplied path as a file inside the rip directory.
+
+    Realpath containment plus an extension allow-list: the copy target is
+    built from this, so it must not be able to point at anything else.
+    """
+    root = os.path.realpath(_rip_settings()["output_dir"])
+    full = os.path.realpath(os.path.join(root, os.path.basename(path or "")))
+    if os.path.dirname(full) != root:
+        return None
+    if not full.lower().endswith(_RIP_VIDEO_EXTS):
+        return None
+    if not os.path.isfile(full):
+        return None
+    return full
+
+
+def _rip_copy_destination(cfg, folder_name, need_bytes):
+    """Pick which same-name folder this file should land in.
+
+    Same-name folders are a fallback group (see the media-copy feature): df
+    each in order and take the first that still leaves the drive's safety
+    margin free. Returns (folder, error).
+    """
+    candidates = [f for f in (cfg.get("folders") or []) if f.get("name") == folder_name]
+    if not candidates:
+        return None, f"unknown destination folder '{folder_name}'"
+    if len(candidates) == 1 and not need_bytes:
+        return candidates[0], None
+
+    user, host = cfg["user"], cfg["host"]
+    port = int(cfg.get("port") or 22)
+    shortfalls = []
+    for cand in candidates:
+        try:
+            total, _, free, mount = _remote_df(user, host, port, cand["path"])
+        except RuntimeError as e:
+            # Unreachable disk — try the next, and if none work let rsync
+            # surface the real error rather than blocking on a df failure.
+            shortfalls.append(f"{cand['path']}: {e}")
+            continue
+        short = _space_shortfall(need_bytes, total, free,
+                                 _space_margin_fraction(cfg, mount))
+        if short == 0:
+            return cand, None
+        shortfalls.append(
+            f"{cand['path']}: {_human_bytes(short)} short of the safety margin")
+    if len(shortfalls) == len(candidates) and all(
+            "short of" in s for s in shortfalls):
+        return None, "not enough free space — " + "; ".join(shortfalls)
+    return candidates[0], None
+
+
+def _run_rip_copy(path, folder, cfg):
+    """rsync one finished rip to the media server, reporting progress."""
+    with _active_rip_copies_lock:
+        info = _active_rip_copies.get(path)
+        if info is None:
+            info = {"cancel": threading.Event(), "proc": None}
+            _active_rip_copies[path] = info
+    cancel_event = info["cancel"]
+
+    def cancelled():
+        return cancel_event.is_set()
+
+    def register_proc(p):
+        with _active_rip_copies_lock:
+            live = _active_rip_copies.get(path)
+            if live is not None:
+                live["proc"] = p
+
+    name = os.path.basename(path)
+    user, host = cfg["user"], cfg["host"]
+    port = int(cfg.get("port") or 22)
+    dest_dir = folder["path"]
+    dest_path = f"{dest_dir.rstrip('/')}/{name}"
+    try:
+        total_bytes = os.path.getsize(path)
+    except OSError:
+        total_bytes = 0
+
+    update_rip_copy_entry(
+        path, _replace=True, name=name, status="copying", percent=0.0,
+        bytes=0, total_bytes=total_bytes, dest_host=host, dest_path=dest_path,
+        folder=folder.get("name"), started_at=_now_iso())
+
+    status = "error"
+    error_message = None
+    try:
+        # Pre-create the remote directory so rsync doesn't fail on a library
+        # path that hasn't been made yet.
+        mk = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             "-o", "StrictHostKeyChecking=accept-new",
+             "-p", str(port), f"{user}@{host}",
+             f"mkdir -p {shlex.quote(dest_dir)}"],
+            capture_output=True, text=True, timeout=60)
+        if mk.returncode != 0:
+            raise RuntimeError(
+                f"remote mkdir failed: {(mk.stderr or '').strip() or 'unknown error'}")
+        if cancelled():
+            raise _RipCopyCancelled()
+
+        try:
+            bwlimit = int(cfg.get("bwlimit_kbps") or 0)
+        except (TypeError, ValueError):
+            bwlimit = 0
+        cmd = [
+            "rsync", "-a", "-s", "--partial",
+            f"--timeout={_COPY_RSYNC_IO_TIMEOUT}",
+            "--info=progress2", "--no-i-r",
+            *([f"--bwlimit={bwlimit}"] if bwlimit > 0 else []),
+            "-e", _copy_ssh_transport(port),
+            "--", path, f"{user}@{host}:{shlex.quote(dest_dir.rstrip('/'))}/",
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        register_proc(proc)
+
+        err_tail = deque(maxlen=20)
+
+        def drain_stderr():
+            for line in proc.stderr:
+                err_tail.append(line.decode("utf-8", errors="replace").rstrip())
+
+        t = threading.Thread(target=drain_stderr, daemon=True)
+        t.start()
+        for line in _read_rsync_progress(proc.stdout):
+            if cancelled():
+                proc.terminate()
+                break
+            m = COPY_PROGRESS_RE.match(line)
+            if not m:
+                continue
+            moved = int(m.group(1).replace(",", ""))
+            eta = int(m.group(4)) * 3600 + int(m.group(5)) * 60 + int(m.group(6))
+            update_rip_copy_entry(
+                path, _persist=False, bytes=moved, percent=float(m.group(2)),
+                rate=m.group(3), eta_seconds=eta)
+        rc = proc.wait()
+        t.join(timeout=5)
+
+        if cancelled():
+            raise _RipCopyCancelled()
+        if rc != 0:
+            raise RuntimeError(
+                "\n".join(err_tail).strip() or f"rsync exited with code {rc}")
+
+        # rsync exiting 0 only proves the bytes left this host; confirm the
+        # file is actually there before calling it copied.
+        try:
+            verified = _remote_verify_paths(user, host, port, [dest_path])
+        except RuntimeError as e:
+            raise RuntimeError(f"copy could not be verified: {e}")
+        status = "done"
+        update_rip_copy_entry(path, _persist=False,
+                              verified_bytes=verified, percent=100.0,
+                              bytes=total_bytes)
+    except _RipCopyCancelled:
+        status = "cancelled"
+    except FileNotFoundError as e:
+        error_message = ("rsync is not installed on this host"
+                         if "rsync" in str(e) else str(e))
+    except subprocess.TimeoutExpired:
+        error_message = "ssh timed out reaching the media server"
+    except RuntimeError as e:
+        error_message = str(e)
+    except Exception as e:  # noqa: BLE001
+        error_message = f"unexpected failure: {e}"
+    finally:
+        update_rip_copy_entry(
+            path, status=status, finished_at=_now_iso(),
+            eta_seconds=None, error_message=error_message,
+            tailscale_auth_url=_tailscale_auth_hint(error_message or ""))
+        with _active_rip_copies_lock:
+            _active_rip_copies.pop(path, None)
+        try:
+            if status == "done":
+                msg = f"Copied rip {name} to {host}:{dest_path}"
+            elif status == "cancelled":
+                msg = f"Copy of {name} cancelled by user"
+            else:
+                msg = f"Copy of {name} failed: {error_message or 'unknown error'}"
+            db.log_event("rip.copied", _copy_severity(status), msg,
+                         details={"path": path, "status": status,
+                                  "dest_host": host, "dest_path": dest_path,
+                                  "folder": folder.get("name")})
+        except Exception:
+            pass
+        if status == "done":
+            _trigger_library_refresh(cfg, folder, torrent_name=name)
+
+
+class _RipCopyCancelled(Exception):
+    """Internal signal: the user cancelled this copy."""
+
+
 def _run_startup_rip_reconcile():
-    """Startup hook for _reconcile_interrupted_rips(). Never aborts boot."""
+    """Startup hook for the rip + rip-copy reconcilers. Never aborts boot."""
     try:
         _reconcile_interrupted_rips()
     except Exception as e:
         print(f"[startup] rip-state reconcile failed: {e}", file=sys.stderr)
+    try:
+        _reconcile_interrupted_rip_copies()
+    except Exception as e:
+        print(f"[startup] rip-copy-state reconcile failed: {e}", file=sys.stderr)
 
 
 _run_startup_rip_reconcile()
+
+
+@app.route("/api/rip/files")
+@login_required
+def api_rip_files():
+    """Finished rips plus where they can be copied to."""
+    cfg = _read_media_config()
+    folders = cfg.get("folders") or []
+    configured = bool(cfg.get("host") and cfg.get("user") and folders)
+    # Same-name folders are one fallback group, so offer each name once.
+    names = []
+    for f in folders:
+        if f.get("name") and f["name"] not in names:
+            names.append(f["name"])
+    return jsonify({
+        "ok": True,
+        "files": _rip_files(),
+        "media": {
+            "configured": configured,
+            "host": cfg.get("host"),
+            "folders": names,
+        },
+    })
+
+
+@app.route("/api/rip/files/copy", methods=["POST"])
+@login_required
+def api_rip_file_copy():
+    data = request.get_json(silent=True) or {}
+    path = _resolve_rip_file(data.get("path"))
+    if path is None:
+        return _err("unknown rip file", 404)
+
+    cfg = _read_media_config()
+    if not (cfg.get("host") and cfg.get("user") and cfg.get("folders")):
+        return _err("media destination is not configured — set it up in "
+                    "Settings first", 400)
+    folder_name = (data.get("folder") or "").strip()
+    if not folder_name:
+        return _err("destination folder is required", 400)
+
+    try:
+        need = os.path.getsize(path)
+    except OSError:
+        need = 0
+    folder, err = _rip_copy_destination(cfg, folder_name, need)
+    if err:
+        return _err(err, 400 if "unknown" in err else 409)
+
+    # Reserve before spawning so a double-click can't start two rsyncs.
+    with _active_rip_copies_lock:
+        if path in _active_rip_copies:
+            return _err("that file is already being copied", 409)
+        _active_rip_copies[path] = {"cancel": threading.Event(), "proc": None}
+    try:
+        threading.Thread(target=_run_rip_copy, args=(path, folder, cfg),
+                         daemon=True).start()
+    except Exception as e:  # noqa: BLE001 - never leak the reservation
+        with _active_rip_copies_lock:
+            _active_rip_copies.pop(path, None)
+        return _err(f"could not start copy: {e}")
+    return jsonify({"ok": True, "folder": folder.get("name"),
+                    "dest_path": f"{folder['path'].rstrip('/')}/"
+                                 f"{os.path.basename(path)}"})
+
+
+@app.route("/api/rip/files/copy/stop", methods=["POST"])
+@login_required
+def api_rip_file_copy_stop():
+    data = request.get_json(silent=True) or {}
+    path = _resolve_rip_file(data.get("path"))
+    if path is None:
+        return _err("unknown rip file", 404)
+    with _active_rip_copies_lock:
+        info = _active_rip_copies.get(path)
+        if info is None:
+            return _err("no copy is running for that file", 404)
+        info["cancel"].set()
+        proc = info.get("proc")
+    # rsync can sit in a blocking read on a dead transport; the cancel flag
+    # alone wouldn't be noticed until it returned.
+    if proc is not None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    return jsonify({"ok": True})
 
 
 @app.route("/rips")
