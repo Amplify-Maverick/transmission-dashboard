@@ -349,6 +349,175 @@ class TestRunRipCopy(_RipCopyBase):
         refresh.assert_not_called()
 
 
+class TestRipInProgressFiles(_RipCopyBase):
+    """HandBrake writes straight to the final path, so a rip in progress looks
+    like a file in the output directory that grows from zero."""
+
+    def _ripping(self, path, **fields):
+        """Register `path` as the live output of a running rip on /dev/sr1."""
+        app._rip_state_cache = {}
+        self.addCleanup(setattr, app, "_rip_state_cache", None)
+        self._enter(mock.patch.object(
+            app, "RIP_STATE_FILE", os.path.join(self.tmp, "rip_state.json")))
+        app.update_rip_entry("/dev/sr1", status="ripping", output_path=path,
+                             **fields)
+        cancel = app.threading.Event()
+        with app._active_rips_lock:
+            app._active_rips["/dev/sr1"] = {"cancel": cancel}
+        self.addCleanup(lambda: app._active_rips.pop("/dev/sr1", None))
+
+    def test_in_progress_output_is_flagged(self):
+        path = self.make_file("Half.mkv", size=1024)
+        self._ripping(path, percent=62.5, phase="working", **{"pass": 2})
+        f = next(x for x in app._rip_files() if x["path"] == path)
+        self.assertIsNotNone(f["ripping"])
+        self.assertEqual(f["ripping"]["percent"], 62.5)
+        self.assertEqual(f["ripping"]["pass"], 2)
+
+    def test_finished_files_are_not_flagged(self):
+        done = self.make_file("Done.mkv")
+        live = self.make_file("Half.mkv")
+        self._ripping(live)
+        by_name = {f["name"]: f for f in app._rip_files()}
+        self.assertIsNone(by_name["Done.mkv"]["ripping"])
+        self.assertIsNotNone(by_name["Half.mkv"]["ripping"])
+
+    def test_nothing_flagged_when_no_rip_runs(self):
+        self.make_file("Done.mkv")
+        self.assertEqual(app._active_rip_output_paths(), {})
+        self.assertIsNone(app._rip_files()[0]["ripping"])
+
+    def test_copy_is_refused_while_ripping(self):
+        # Copying mid-encode ships a truncated movie, and a two-pass encode
+        # rewrites the file wholesale on pass 2.
+        path = self.make_file("Half.mkv")
+        self._ripping(path)
+        client = app.app.test_client()
+        with client.session_transaction() as s:
+            s["logged_in"] = True
+        res = client.post("/api/rip/files/copy",
+                          json={"path": "Half.mkv", "folder": "Movies"})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("still being ripped", res.get_json()["error"])
+
+    def test_delete_is_refused_while_ripping(self):
+        path = self.make_file("Half.mkv")
+        self._ripping(path)
+        client = app.app.test_client()
+        with client.session_transaction() as s:
+            s["logged_in"] = True
+        res = client.post("/api/rip/files/delete", json={"path": "Half.mkv"})
+        self.assertEqual(res.status_code, 409)
+        self.assertTrue(os.path.exists(path))
+
+
+class TestCopyStateIdentity(_RipCopyBase):
+    """Copy state is keyed by path, and paths get reused."""
+
+    def test_matching_state_is_kept(self):
+        path = self.make_file("A.mkv", size=100)
+        st = os.stat(path)
+        app.update_rip_copy_entry(path, status="done", source_size=st.st_size,
+                                  source_mtime=st.st_mtime)
+        self.assertEqual(app._rip_files()[0]["copy"]["status"], "done")
+
+    def test_state_for_a_replaced_file_is_dropped(self):
+        # Rip "A.mkv", copy it, delete it, rip the same disc again: the new
+        # file must not inherit "on media server" from the old one.
+        path = self.make_file("A.mkv", size=100)
+        st = os.stat(path)
+        app.update_rip_copy_entry(path, status="done", source_size=st.st_size,
+                                  source_mtime=st.st_mtime)
+        os.remove(path)
+        self.make_file("A.mkv", size=999)
+        self.assertNotIn("status", app._rip_files()[0]["copy"])
+
+    def test_growing_file_invalidates_state(self):
+        path = self.make_file("A.mkv", size=100)
+        st = os.stat(path)
+        app.update_rip_copy_entry(path, status="done", source_size=st.st_size,
+                                  source_mtime=st.st_mtime)
+        with open(path, "ab") as f:
+            f.write(b"\0" * 50)
+        self.assertNotIn("status", app._rip_files()[0]["copy"])
+
+    def test_legacy_state_without_identity_is_trusted(self):
+        path = self.make_file("A.mkv")
+        app.update_rip_copy_entry(path, status="done")
+        self.assertEqual(app._rip_files()[0]["copy"]["status"], "done")
+
+    def test_matcher_tolerates_sub_second_mtime_drift(self):
+        path = self.make_file("A.mkv", size=100)
+        st = os.stat(path)
+        self.assertTrue(app._copy_state_matches_file(
+            {"source_size": 100, "source_mtime": st.st_mtime + 0.4}, st))
+        self.assertFalse(app._copy_state_matches_file(
+            {"source_size": 100, "source_mtime": st.st_mtime + 30}, st))
+
+    def test_matcher_ignores_unparseable_values(self):
+        path = self.make_file("A.mkv", size=100)
+        st = os.stat(path)
+        self.assertTrue(app._copy_state_matches_file(
+            {"source_size": "x", "source_mtime": "y"}, st))
+
+
+class TestDeleteRipFile(_RipCopyBase):
+    def setUp(self):
+        super().setUp()
+        self.client = app.app.test_client()
+        with self.client.session_transaction() as s:
+            s["logged_in"] = True
+
+    def test_deletes_the_file_and_reports_freed_space(self):
+        path = self.make_file("A.mkv", size=4096)
+        res = self.client.post("/api/rip/files/delete", json={"path": "A.mkv"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["freed"], 4096)
+        self.assertFalse(os.path.exists(path))
+
+    def test_clears_the_copy_result(self):
+        path = self.make_file("A.mkv")
+        app.update_rip_copy_entry(path, status="done")
+        self.client.post("/api/rip/files/delete", json={"path": "A.mkv"})
+        self.assertNotIn(path, app.load_rip_copy_state())
+
+    def test_logs_an_event(self):
+        self.make_file("A.mkv")
+        self.client.post("/api/rip/files/delete", json={"path": "A.mkv"})
+        self.assertIn("rip.deleted",
+                      [c.args[0] for c in self.events.call_args_list])
+
+    def test_refuses_while_copying(self):
+        path = self.make_file("A.mkv")
+        with app._active_rip_copies_lock:
+            app._active_rip_copies[path] = {"cancel": app.threading.Event(),
+                                           "proc": None}
+        self.addCleanup(lambda: app._active_rip_copies.pop(path, None))
+        res = self.client.post("/api/rip/files/delete", json={"path": "A.mkv"})
+        self.assertEqual(res.status_code, 409)
+        self.assertIn("being copied", res.get_json()["error"])
+        self.assertTrue(os.path.exists(path))
+
+    def test_cannot_delete_outside_the_output_directory(self):
+        outside = os.path.join(self.tmp, "keepme.mkv")
+        open(outside, "w").close()
+        for candidate in ("../keepme.mkv", outside, "/etc/passwd"):
+            res = self.client.post("/api/rip/files/delete",
+                                   json={"path": candidate})
+            self.assertEqual(res.status_code, 404)
+        self.assertTrue(os.path.exists(outside))
+
+    def test_missing_file(self):
+        res = self.client.post("/api/rip/files/delete", json={"path": "ghost.mkv"})
+        self.assertEqual(res.status_code, 404)
+
+    def test_requires_login(self):
+        self.make_file("A.mkv")
+        anon = app.app.test_client()
+        res = anon.post("/api/rip/files/delete", json={"path": "A.mkv"})
+        self.assertEqual(res.status_code, 401)
+
+
 class TestRipCopyReconcile(_RipCopyBase):
     def test_copying_becomes_interrupted(self):
         path = self.make_file()

@@ -653,12 +653,12 @@
                 btn.disabled = false;
             }
         });
-        card.querySelector('[data-action="cancel"]').addEventListener('click', async (e) => {
+        card.querySelector('[data-action="stop"]').addEventListener('click', async (e) => {
             const btn = e.currentTarget;
             btn.disabled = true;
             try {
                 await postJSON('/api/rip/files/copy/stop', { path });
-                toast('Cancelling copy…');
+                toast('Stopping copy…');
             } catch (err) {
                 toast(err.message, 'error');
             } finally {
@@ -666,6 +666,47 @@
                 refreshFiles();
             }
         });
+
+        // Deleting is irreversible, so it takes two clicks rather than a
+        // modal — the second click within a few seconds does it.
+        const removeBtn = card.querySelector('[data-action="remove"]');
+        removeBtn.addEventListener('click', async () => {
+            if (removeBtn.dataset.armed !== 'yes') {
+                armRemove(removeBtn);
+                return;
+            }
+            disarmRemove(removeBtn);
+            removeBtn.disabled = true;
+            showError(filesErrorEl, '');
+            try {
+                const res = await postJSON('/api/rip/files/delete', { path });
+                toast(`Removed — ${fmtBytes(res.freed)} freed`);
+                card.remove();
+                refreshFiles();
+            } catch (err) {
+                showError(filesErrorEl, err.message);
+                toast(err.message, 'error');
+                removeBtn.disabled = false;
+            }
+        });
+    }
+
+    const REMOVE_ARM_MS = 4000;
+
+    function armRemove(btn) {
+        btn.dataset.armed = 'yes';
+        btn.dataset.label = btn.textContent;
+        btn.textContent = 'Really remove?';
+        btn.classList.add('btn-danger');
+        btn._armTimer = setTimeout(() => disarmRemove(btn), REMOVE_ARM_MS);
+    }
+
+    function disarmRemove(btn) {
+        if (btn._armTimer) clearTimeout(btn._armTimer);
+        if (btn.dataset.armed !== 'yes') return;
+        delete btn.dataset.armed;
+        btn.textContent = btn.dataset.label || 'Remove';
+        btn.classList.remove('btn-danger');
     }
 
     function fillFolderSelect(select, path) {
@@ -689,10 +730,15 @@
     function updateFileCard(card, f) {
         const copy = f.copy || {};
         const busy = !!copy.active || copy.status === COPY_BUSY;
+        // Still being written by HandBrake — not a finished file yet.
+        const ripping = f.ripping || null;
 
         field(card, 'name').textContent = f.name;
         field(card, 'size').textContent = fmtBytes(f.size);
         field(card, 'when').textContent = fmtWhen(f.modified);
+        // "ripped <timestamp>" is meaningless while it's still being written;
+        // the pill and progress bar carry the state instead.
+        field(card, 'when').closest('.meta-item').hidden = !!ripping;
 
         setMeta(card, 'runtime', f.duration_seconds ? fmtDuration(f.duration_seconds) : null);
         setMeta(card, 'disc', f.disc_label);
@@ -702,7 +748,7 @@
             ? fmtDuration(copy.eta_seconds) : null);
 
         const pill = field(card, 'pill');
-        const label = copyPill(copy, busy);
+        const label = ripping ? ripPill(ripping) : copyPill(copy, busy);
         pill.hidden = !label;
         if (label) {
             pill.textContent = label.text;
@@ -714,28 +760,42 @@
         }
 
         const bar = field(card, 'progress');
-        bar.hidden = !busy;
-        if (busy) {
-            const pct = Math.min(100, Math.max(0, copy.percent || 0));
-            field(card, 'fill').style.width = `${pct}%`;
+        bar.hidden = !busy && !ripping;
+        if (!bar.hidden) {
+            const raw = ripping ? ripping.percent : copy.percent;
+            field(card, 'fill').style.width = `${Math.min(100, Math.max(0, raw || 0))}%`;
         }
 
         const errBox = field(card, 'error-box');
-        const failed = ['error', 'interrupted'].includes(copy.status) && copy.error_message;
+        const failed = !ripping && ['error', 'interrupted'].includes(copy.status)
+            && copy.error_message;
         errBox.hidden = !failed;
         if (failed) field(card, 'error-msg').textContent = copy.error_message;
 
         const select = field(card, 'folder');
         const copyBtn = card.querySelector('[data-action="copy"]');
-        const cancelBtn = card.querySelector('[data-action="cancel"]');
+        const stopBtn = card.querySelector('[data-action="stop"]');
+        const removeBtn = card.querySelector('[data-action="remove"]');
         fillFolderSelect(select, f.path);
-        select.disabled = busy || !mediaInfo.configured;
+        select.disabled = busy || ripping || !mediaInfo.configured;
         copyBtn.hidden = busy;
-        copyBtn.disabled = !mediaInfo.configured || !mediaInfo.folders.length;
+        // Copying a file mid-encode ships a truncated movie — and a two-pass
+        // encode rewrites it completely on pass 2, so even a 99% file is junk.
+        copyBtn.disabled = !!ripping || !mediaInfo.configured || !mediaInfo.folders.length;
+        copyBtn.title = ripping ? 'Still ripping — wait for the encode to finish' : '';
         // A file already on the server can still be re-sent (e.g. after
         // changing library folders) — rsync skips it if it's identical.
         copyBtn.textContent = copy.status === 'done' ? 'Copy again' : 'Copy';
-        cancelBtn.hidden = !busy;
+        stopBtn.hidden = !busy;
+        removeBtn.hidden = busy || !!ripping;
+        if (removeBtn.hidden) disarmRemove(removeBtn);
+    }
+
+    function ripPill(ripping) {
+        const p = ripping.pass_count > 1 && ripping.pass
+            ? ` (pass ${ripping.pass}/${ripping.pass_count})`
+            : '';
+        return { text: `ripping${p}`, state: 'checking' };
     }
 
     function setMeta(card, name, value) {

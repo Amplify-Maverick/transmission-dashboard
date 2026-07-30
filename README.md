@@ -600,9 +600,16 @@ finished file on the right as a card (size, source disc, preset, runtime).
 Each card can copy its file to the media server over SSH — same host, folders,
 bandwidth limit, free-space margin and library refresh as the torrent copy
 feature, configured once in **Settings → Media server**. Pick a library folder
-and hit **Copy**; progress, cancellation and failures show on the card, and a
-successful copy is verified on the remote before it's marked done. Files are
-never deleted locally, so re-copying is always safe.
+and hit **Copy**; progress shows on the card, **Stop copy** aborts it, and a
+successful copy is verified on the remote before it's marked done. **Remove**
+deletes the local file (two clicks — it's irreversible); a copy already on the
+media server is untouched.
+
+A file still being written by an encode is shown greyed out with a `ripping`
+pill and cannot be copied or removed. That matters: HandBrake writes straight
+to the final path, so a rip in progress is a real (growing, unplayable) file in
+the output directory, and a two-pass encode rewrites it from scratch on the
+second pass — copying it early ships a truncated movie.
 
 Settings live on the tab itself (output directory, default preset, container,
 nice level, minimum title length, concurrency, eject-when-done) and persist to

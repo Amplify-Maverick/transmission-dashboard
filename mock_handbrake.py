@@ -164,18 +164,47 @@ class MockHandBrake(HandBrake):
             "disc_name": drive["disc_label"],
         }
 
+    # Final size of a mock rip. Small, but it grows over the run the way a
+    # real encode does — the Rips tab has to cope with a partial file sitting
+    # in the output directory, so the mock must produce one.
+    _MOCK_OUTPUT_BYTES = 8 * 1024 * 1024
+
     def run_rip(self, cmd, on_progress=None, cancelled=None):
-        """Simulate an encode: a short scan pass, then WORKING, then MUXING."""
+        """Simulate a two-pass encode, growing the output file as it goes."""
         output = cmd[cmd.index("--output") + 1] if "--output" in cmd else None
+        if output:
+            try:
+                os.makedirs(os.path.dirname(output), exist_ok=True)
+            except OSError as e:
+                return 1, [f"mock: could not create output directory: {e}"]
+
+        def grow(frac):
+            """Write the file out to `frac` of its final size."""
+            if not output:
+                return None
+            try:
+                with open(output, "wb") as f:
+                    f.write(b"\0" * int(self._MOCK_OUTPUT_BYTES * frac))
+            except OSError as e:
+                return f"mock: could not write output: {e}"
+            return None
 
         if on_progress:
             on_progress({"state": "SCANNING", "percent": 0.0})
         started = time.monotonic()
+        # Two passes, so the pass counter in the UI gets exercised — and so
+        # does the fact that pass 2 rewrites the file from scratch.
+        pass_count = 2
         while True:
             if cancelled is not None and cancelled():
                 return 1, ["mock: cancelled"]
             elapsed = time.monotonic() - started
             frac = min(1.0, elapsed / _MOCK_RIP_SECONDS)
+            current_pass = 1 if frac < 0.5 else 2
+            # Pass 1 only analyses; pass 2 writes the file.
+            err = grow(0.0 if current_pass == 1 else (frac - 0.5) * 2)
+            if err:
+                return 1, [err]
             if on_progress:
                 on_progress({
                     "state": "WORKING",
@@ -183,8 +212,8 @@ class MockHandBrake(HandBrake):
                     "fps": 42.5,
                     "avg_fps": 40.1,
                     "eta_seconds": int(_MOCK_RIP_SECONDS - elapsed),
-                    "pass": 1,
-                    "pass_count": 1,
+                    "pass": current_pass,
+                    "pass_count": pass_count,
                     "paused": False,
                 })
             if frac >= 1.0:
@@ -193,13 +222,9 @@ class MockHandBrake(HandBrake):
 
         if on_progress:
             on_progress({"state": "MUXING", "percent": 100.0})
-        if output:
-            try:
-                os.makedirs(os.path.dirname(output), exist_ok=True)
-                with open(output, "wb") as f:
-                    f.write(b"\0" * 1024 * 512)  # stand-in, not real video
-            except OSError as e:
-                return 1, [f"mock: could not write output: {e}"]
+        err = grow(1.0)
+        if err:
+            return 1, [err]
         if on_progress:
             on_progress({"state": "WORKDONE", "error_code": 0})
         return 0, ["mock: encode finished"]

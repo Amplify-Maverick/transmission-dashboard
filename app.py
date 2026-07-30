@@ -6350,6 +6350,12 @@ def _run_rip(device, title, output_path, preset, container, audio, subtitles,
     cancel_event = info["cancel"]
 
     started_at = _now_iso()
+    # A previous file may have occupied this exact path and been copied; that
+    # result says nothing about the file about to be written here.
+    with _rip_copy_state_lock:
+        state = _ensure_rip_copy_state_cache_unlocked()
+        if state.pop(output_path, None) is not None:
+            _atomic_write_json(RIP_COPY_STATE_FILE, state)
     update_rip_entry(
         device, _replace=True,
         status="ripping", phase="starting", percent=0.0,
@@ -6563,6 +6569,54 @@ def _reconcile_interrupted_rip_copies():
     return stale
 
 
+def _active_rip_output_paths():
+    """Map output path -> live rip state, for encodes still running.
+
+    HandBrake writes straight to the final path, so a rip in progress looks
+    like an ordinary file in the output directory that grows from zero. It has
+    to be marked as such: a half-written file must never be copied to the
+    media library, and a two-pass encode rewrites the file completely on pass
+    2, so even a "nearly done" partial is worthless.
+    """
+    with _active_rips_lock:
+        devices = set(_active_rips)
+    if not devices:
+        return {}
+    live = {}
+    for device, entry in load_rip_state().items():
+        if device in devices and entry.get("output_path"):
+            live[entry["output_path"]] = {
+                "percent": entry.get("percent"),
+                "phase": entry.get("phase"),
+                "pass": entry.get("pass"),
+                "pass_count": entry.get("pass_count"),
+                "device": device,
+            }
+    return live
+
+
+def _copy_state_matches_file(copy, st):
+    """Is this copy-state entry still about the file that's on disk now?
+
+    State is keyed by path, and a path gets reused — rip "Film.mkv", copy it,
+    delete it locally, rip the same disc again and the new file inherits the
+    old entry, which would show as "on media server" when nothing has been
+    sent. The size/mtime recorded at copy time settle it.
+    """
+    size = copy.get("source_size")
+    mtime = copy.get("source_mtime")
+    if size is None or mtime is None:
+        # Written before this check existed — trust it rather than hiding a
+        # genuine copy result.
+        return True
+    try:
+        # A one-second tolerance: some filesystems (and rsync's own
+        # timestamp handling) round mtime to whole seconds.
+        return int(size) == st.st_size and abs(float(mtime) - st.st_mtime) <= 1
+    except (TypeError, ValueError):
+        return True
+
+
 def _rip_files():
     """Finished rips on disk, newest first, enriched with history + copy state.
 
@@ -6573,6 +6627,7 @@ def _rip_files():
     settings = _rip_settings()
     root = settings["output_dir"]
     copies = load_rip_copy_state()
+    in_progress = _active_rip_output_paths()
     history = {}
     try:
         for row in db.list_rips(200):
@@ -6597,7 +6652,11 @@ def _rip_files():
         if not os.path.isfile(full):
             continue
         row = history.get(full) or {}
+        ripping = in_progress.get(full)
         copy = copies.get(full) or {}
+        if copy and not _copy_state_matches_file(copy, st):
+            # Different file at the same path — don't claim it was copied.
+            copy = {}
         with _active_rip_copies_lock:
             copy["active"] = full in _active_rip_copies
         out.append({
@@ -6605,6 +6664,9 @@ def _rip_files():
             "path": full,
             "size": st.st_size,
             "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+            # While this is set the file is still being written; the UI must
+            # not offer to copy or remove it.
+            "ripping": ripping,
             "disc_label": row.get("disc_label"),
             "preset": row.get("preset"),
             "title_index": row.get("title_index"),
@@ -6692,14 +6754,17 @@ def _run_rip_copy(path, folder, cfg):
     dest_dir = folder["path"]
     dest_path = f"{dest_dir.rstrip('/')}/{name}"
     try:
-        total_bytes = os.path.getsize(path)
+        st = os.stat(path)
+        total_bytes, source_mtime = st.st_size, st.st_mtime
     except OSError:
-        total_bytes = 0
+        total_bytes, source_mtime = 0, None
 
     update_rip_copy_entry(
         path, _replace=True, name=name, status="copying", percent=0.0,
         bytes=0, total_bytes=total_bytes, dest_host=host, dest_path=dest_path,
-        folder=folder.get("name"), started_at=_now_iso())
+        folder=folder.get("name"), started_at=_now_iso(),
+        # Pin which file this result is about — see _copy_state_matches_file.
+        source_size=total_bytes, source_mtime=source_mtime)
 
     status = "error"
     error_message = None
@@ -6858,6 +6923,12 @@ def api_rip_file_copy():
     if path is None:
         return _err("unknown rip file", 404)
 
+    # A rip in progress is a growing, unplayable file — and a two-pass encode
+    # rewrites it wholesale on the second pass.
+    if path in _active_rip_output_paths():
+        return _err("that file is still being ripped — wait for the encode to "
+                    "finish before copying it", 409)
+
     cfg = _read_media_config()
     if not (cfg.get("host") and cfg.get("user") and cfg.get("folders")):
         return _err("media destination is not configured — set it up in "
@@ -6889,6 +6960,49 @@ def api_rip_file_copy():
     return jsonify({"ok": True, "folder": folder.get("name"),
                     "dest_path": f"{folder['path'].rstrip('/')}/"
                                  f"{os.path.basename(path)}"})
+
+
+@app.route("/api/rip/files/delete", methods=["POST"])
+@login_required
+def api_rip_file_delete():
+    """Delete a finished rip from the local output directory.
+
+    Only ever touches files inside that directory (see _resolve_rip_file), and
+    never one that something else is currently reading or writing.
+    """
+    data = request.get_json(silent=True) or {}
+    path = _resolve_rip_file(data.get("path"))
+    if path is None:
+        return _err("unknown rip file", 404)
+    if path in _active_rip_output_paths():
+        return _err("that file is still being ripped — cancel the rip first",
+                    409)
+    with _active_rip_copies_lock:
+        if path in _active_rip_copies:
+            return _err("that file is being copied — stop the copy first", 409)
+
+    name = os.path.basename(path)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    try:
+        os.remove(path)
+    except OSError as e:
+        return _err(f"could not delete {name}: {e}")
+
+    # The copy result described the file that just went away.
+    with _rip_copy_state_lock:
+        state = _ensure_rip_copy_state_cache_unlocked()
+        if state.pop(path, None) is not None:
+            _atomic_write_json(RIP_COPY_STATE_FILE, state)
+    try:
+        db.log_event("rip.deleted", "info",
+                     f"Deleted local rip {name} ({_human_bytes(size)})",
+                     details={"path": path, "bytes": size})
+    except Exception:
+        pass
+    return jsonify({"ok": True, "freed": size})
 
 
 @app.route("/api/rip/files/copy/stop", methods=["POST"])
