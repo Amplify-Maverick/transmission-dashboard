@@ -634,6 +634,7 @@
     function wireFileCard(card, path) {
         field(card, 'folder').addEventListener('change', (e) => {
             folderChoice.set(path, e.currentTarget.value);
+            updateDestPreview(card);
         });
         card.querySelector('[data-action="copy"]').addEventListener('click', async (e) => {
             const btn = e.currentTarget;
@@ -789,6 +790,23 @@
         stopBtn.hidden = !busy;
         removeBtn.hidden = busy || !!ripping;
         if (removeBtn.hidden) disarmRemove(removeBtn);
+        updateDestPreview(card);
+        if (ripping || busy) field(card, 'dest').hidden = true;
+    }
+
+    // Mirrors _rip_copy_paths: each movie gets its own folder so Jellyfin can
+    // keep the .nfo and artwork beside the video.
+    function updateDestPreview(card) {
+        const dest = field(card, 'dest');
+        const name = field(card, 'name').textContent;
+        const folder = field(card, 'folder').value;
+        if (!name || !folder || !mediaInfo.configured) {
+            dest.hidden = true;
+            return;
+        }
+        const base = name.replace(/\.[^.]+$/, '');
+        dest.hidden = false;
+        dest.textContent = `→ ${folder}/${base}/${name}`;
     }
 
     function ripPill(ripping) {

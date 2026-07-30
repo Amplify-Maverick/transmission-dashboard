@@ -599,8 +599,12 @@ The page is two columns: the drive and rip settings on the left, and every
 finished file on the right as a card (size, source disc, preset, runtime).
 Each card can copy its file to the media server over SSH — same host, folders,
 bandwidth limit, free-space margin and library refresh as the torrent copy
-feature, configured once in **Settings → Media server**. Pick a library folder
-and hit **Copy**; progress shows on the card, **Stop copy** aborts it, and a
+feature, configured once in **Settings → Media server**. The file lands in its
+own folder, `<library>/Movie (Year)/Movie (Year).mkv`, which is the layout
+Jellyfin expects (it keeps the `.nfo` and artwork beside the video) and what
+the torrents-page copy produces. The folder name comes from the rip's filename,
+so name the rip with its year and both match; the card shows the exact
+destination path before you copy. Pick a library folder and hit **Copy**; progress shows on the card, **Stop copy** aborts it, and a
 successful copy is verified on the remote before it's marked done. **Remove**
 deletes the local file (two clicks — it's irreversible); a copy already on the
 media server is untouched.

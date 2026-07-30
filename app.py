@@ -6694,6 +6694,33 @@ def _resolve_rip_file(path):
     return full
 
 
+def _rip_movie_folder(filename):
+    """Per-movie folder name for a rip: the filename minus its extension.
+
+    Jellyfin expects `<library>/Movie (Year)/Movie (Year).mkv` so the video,
+    its .nfo and artwork sit together in one folder — the same layout the
+    torrents-page copy builds from its subfolder field. Raises ValueError for a
+    name that can't be a path segment; returns "" when there's nothing usable,
+    in which case the file lands directly in the library folder.
+    """
+    name = os.path.basename(filename or "")
+    # A dotfile has no usable name to build a folder from (splitext treats the
+    # whole of ".mkv" as the stem), and a hidden folder would be worse than
+    # none — put those straight in the library folder instead.
+    if name.startswith("."):
+        return ""
+    base = os.path.splitext(name)[0].strip().rstrip(".").strip()
+    return _sanitize_subfolder(base)
+
+
+def _rip_copy_paths(folder, name):
+    """(remote directory to create, final remote file path) for one rip."""
+    root = folder["path"].rstrip("/")
+    movie_dir = _rip_movie_folder(name)
+    dest_dir = f"{root}/{movie_dir}" if movie_dir else root
+    return dest_dir, f"{dest_dir}/{name}"
+
+
 def _rip_copy_destination(cfg, folder_name, need_bytes):
     """Pick which same-name folder this file should land in.
 
@@ -6751,8 +6778,8 @@ def _run_rip_copy(path, folder, cfg):
     name = os.path.basename(path)
     user, host = cfg["user"], cfg["host"]
     port = int(cfg.get("port") or 22)
-    dest_dir = folder["path"]
-    dest_path = f"{dest_dir.rstrip('/')}/{name}"
+    # One folder per movie, so Jellyfin can keep the .nfo and artwork with it.
+    dest_dir, dest_path = _rip_copy_paths(folder, name)
     try:
         st = os.stat(path)
         total_bytes, source_mtime = st.st_size, st.st_mtime
@@ -6941,6 +6968,14 @@ def api_rip_file_copy():
         need = os.path.getsize(path)
     except OSError:
         need = 0
+    # Validate the per-movie folder name before starting anything, so a bad
+    # one is a clean 400 rather than a failure mid-copy.
+    try:
+        _rip_movie_folder(os.path.basename(path))
+    except ValueError as e:
+        return _err(f"cannot build a destination folder from this filename: {e}",
+                    400)
+
     folder, err = _rip_copy_destination(cfg, folder_name, need)
     if err:
         return _err(err, 400 if "unknown" in err else 409)
@@ -6958,8 +6993,7 @@ def api_rip_file_copy():
             _active_rip_copies.pop(path, None)
         return _err(f"could not start copy: {e}")
     return jsonify({"ok": True, "folder": folder.get("name"),
-                    "dest_path": f"{folder['path'].rstrip('/')}/"
-                                 f"{os.path.basename(path)}"})
+                    "dest_path": _rip_copy_paths(folder, os.path.basename(path))[1]})
 
 
 @app.route("/api/rip/files/delete", methods=["POST"])

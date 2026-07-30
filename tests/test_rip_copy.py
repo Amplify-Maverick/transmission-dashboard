@@ -234,6 +234,82 @@ class TestCopyDestination(_RipCopyBase):
         self.assertIsNone(folder)
 
 
+class TestMovieFolderLayout(_RipCopyBase):
+    """Jellyfin wants <library>/Movie (Year)/Movie (Year).mkv so the video and
+    the .nfo it writes live in the same folder."""
+
+    FOLDER = {"name": "Movies", "path": "/mnt/pool/movies"}
+
+    def test_folder_derived_from_filename(self):
+        self.assertEqual(app._rip_movie_folder("Step Brothers (2008).mkv"),
+                         "Step Brothers (2008)")
+
+    def test_paths(self):
+        dest_dir, dest_path = app._rip_copy_paths(
+            self.FOLDER, "Step Brothers (2008).mkv")
+        self.assertEqual(dest_dir, "/mnt/pool/movies/Step Brothers (2008)")
+        self.assertEqual(
+            dest_path,
+            "/mnt/pool/movies/Step Brothers (2008)/Step Brothers (2008).mkv")
+
+    def test_trailing_slash_on_library_path_is_absorbed(self):
+        _, dest_path = app._rip_copy_paths({"name": "M", "path": "/mnt/pool/movies/"},
+                                           "A.mkv")
+        self.assertEqual(dest_path, "/mnt/pool/movies/A/A.mkv")
+        self.assertNotIn("//", dest_path)
+
+    def test_only_the_extension_is_stripped(self):
+        # Dots inside the title must survive — "Dr. No", "S.W.A.T.".
+        self.assertEqual(app._rip_movie_folder("Dr. No (1962).mkv"),
+                         "Dr. No (1962)")
+
+    def test_dotfile_name_has_no_folder(self):
+        # A hidden folder would be worse than none, so these land in the
+        # library folder directly.
+        self.assertEqual(app._rip_movie_folder(".mkv"), "")
+        self.assertEqual(app._rip_movie_folder("...mkv"), "")
+        _, dest_path = app._rip_copy_paths(self.FOLDER, ".mkv")
+        self.assertEqual(dest_path, "/mnt/pool/movies/.mkv")
+
+    def test_trailing_dot_trimmed(self):
+        # Trailing dots break on SMB shares.
+        self.assertEqual(app._rip_movie_folder("Movie..mkv"), "Movie")
+
+    def test_flag_like_name_rejected(self):
+        # A leading '-' segment could be read as an rsync flag.
+        with self.assertRaises(ValueError):
+            app._rip_movie_folder("-rf.mkv")
+
+    def test_remote_directory_is_created_for_the_movie_folder(self):
+        # The stub ssh accepts any mkdir; assert the worker asked for the
+        # movie folder, not just the library root.
+        path = self.make_file("Step Brothers.mkv")
+        seen = []
+        real_run = app.subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and any("mkdir -p" in str(c) for c in cmd):
+                seen.append(cmd[-1])
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(app.subprocess, "run", side_effect=spy):
+            app._run_rip_copy(path, self.FOLDER, self.CFG)
+        self.assertEqual(
+            seen, ["mkdir -p '/mnt/pool/movies/Step Brothers'"])
+        self.assertEqual(app.load_rip_copy_state()[path]["status"], "done")
+
+    def test_copy_rejected_when_the_folder_name_is_unusable(self):
+        path = self.make_file("-rf.mkv")
+        client = app.app.test_client()
+        with client.session_transaction() as s:
+            s["logged_in"] = True
+        with mock.patch.object(app, "_read_media_config", return_value=self.CFG):
+            res = client.post("/api/rip/files/copy",
+                              json={"path": "-rf.mkv", "folder": "Movies"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("destination folder", res.get_json()["error"])
+
+
 class TestRunRipCopy(_RipCopyBase):
     """The worker, against stub ssh/rsync."""
 
@@ -247,7 +323,9 @@ class TestRunRipCopy(_RipCopyBase):
         self.assertEqual(entry["status"], "done")
         self.assertEqual(entry["percent"], 100.0)
         self.assertEqual(entry["dest_host"], "mediahost")
-        self.assertEqual(entry["dest_path"], "/mnt/pool/movies/Step Brothers.mkv")
+        # One folder per movie, mirroring the torrents-page copy layout.
+        self.assertEqual(entry["dest_path"],
+                         "/mnt/pool/movies/Step Brothers/Step Brothers.mkv")
         self.assertEqual(entry["folder"], "Movies")
         self.assertEqual(entry["total_bytes"], 3000000)
         self.assertTrue(entry["started_at"])
