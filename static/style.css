@@ -894,15 +894,36 @@ body {
 
 /* ---------- scrollbar ---------- */
 
-.torrent-list::-webkit-scrollbar { width: 10px; }
-.torrent-list::-webkit-scrollbar-track { background: transparent; }
-.torrent-list::-webkit-scrollbar-thumb {
+/* Both the single-list layout (.torrent-list, ≤820px) and the two
+   independently-scrolling desktop columns (.torrent-column-list) get the
+   same treatment, so the bars read as part of the panel chrome rather than
+   as native OS widgets. Firefox only honours the standard properties;
+   WebKit/Blink get the pseudo-elements for the inset track look. */
+.torrent-list,
+.torrent-column-list {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+.torrent-list:hover,
+.torrent-column-list:hover {
+    scrollbar-color: var(--border-strong) transparent;
+}
+
+.torrent-list::-webkit-scrollbar,
+.torrent-column-list::-webkit-scrollbar { width: 10px; }
+.torrent-list::-webkit-scrollbar-track,
+.torrent-column-list::-webkit-scrollbar-track { background: transparent; }
+.torrent-list::-webkit-scrollbar-thumb,
+.torrent-column-list::-webkit-scrollbar-thumb {
     background: var(--border);
     border-radius: 5px;
     border: 2px solid var(--bg);
+    background-clip: padding-box;
 }
-.torrent-list::-webkit-scrollbar-thumb:hover {
+.torrent-list::-webkit-scrollbar-thumb:hover,
+.torrent-column-list::-webkit-scrollbar-thumb:hover {
     background: var(--border-strong);
+    background-clip: padding-box;
 }
 
 /* ---------- inline label chips on cards ---------- */
