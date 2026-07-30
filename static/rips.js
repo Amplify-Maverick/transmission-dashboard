@@ -311,6 +311,27 @@
         return ['done', 'error', 'cancelled', 'interrupted'].includes(job.status);
     }
 
+    // How long a finished rip's card stays up after the disc is gone.
+    const TERMINAL_LINGER_SEC = 120;
+
+    function hasSomethingToShow(drive) {
+        if (drive.has_disc) return true;
+        const job = drive.job || {};
+        if (job.active) return true;
+        if (drive.scan && drive.scan.status === 'scanning') return true;
+        // "Eject when done" pops the disc the moment a rip finishes; keep the
+        // result on screen briefly rather than having the card vanish at 100%.
+        if (isRecentTerminal(job) && job.finished_at) {
+            const age = (Date.now() - new Date(job.finished_at).getTime()) / 1000;
+            if (age >= 0 && age < TERMINAL_LINGER_SEC) return true;
+        }
+        return false;
+    }
+
+    function driveLabel(drive) {
+        return `${drive.model || drive.device} (${drive.device})`;
+    }
+
     function jobPhase(job) {
         if (job.status === 'done') return 'finished';
         if (job.status === 'error') return 'failed';
@@ -630,9 +651,18 @@
         }
 
         const drives = data.drives || [];
-        noDrivesEl.hidden = drives.length > 0;
+        // An empty drive is just noise on this page — a machine can have two
+        // (an internal bay plus a USB one) and only the loaded one is useful.
+        const visible = drives.filter(hasSomethingToShow);
+        noDrivesEl.hidden = visible.length > 0;
+        if (!visible.length) {
+            noDrivesEl.textContent = drives.length
+                ? `No disc loaded. Insert one into ${drives.map(driveLabel).join(' or ')}.`
+                : 'No optical drives found. Only /dev/sr* devices are detected — '
+                  + 'if you just plugged in a USB drive, reload the page.';
+        }
         const seen = new Set();
-        drives.forEach(d => {
+        visible.forEach(d => {
             seen.add(d.device);
             updateDrive(cardFor(d.device), d);
         });
