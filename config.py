@@ -66,6 +66,21 @@ TUNNEL_RECOVERY_MAX_ATTEMPTS = int(os.getenv("TUNNEL_RECOVERY_MAX_ATTEMPTS", "3"
 # a days-remaining countdown fetched from the Mullvad API.
 MULLVAD_ACCOUNT = os.getenv("MULLVAD_ACCOUNT")
 
+# ---------- DVD ripping (Rips tab) ----------
+# HandBrakeCLI binary. Looked up on PATH by default; the Rips tab greys
+# itself out with an explanatory note when it isn't found, so an install
+# without HandBrake needs no configuration.
+HANDBRAKE_CLI = os.getenv("HANDBRAKE_CLI", "HandBrakeCLI")
+# Where finished rips are written. Must be writable by the dashboard's
+# service user. Only the default lives here — Settings persists a per-install
+# override in app_config.json (see _rip_settings in app.py).
+RIP_OUTPUT_DIR = os.getenv("RIP_OUTPUT_DIR", os.path.expanduser("~/rips"))
+# Default `nice` level for the encoder. Encoding saturates every core, and
+# transmission-daemon's event loop is single-threaded on the same host — a
+# rip at default priority visibly starves it. 15 keeps rips firmly in the
+# background; 0 disables the nice wrapper.
+RIP_NICE = int(os.getenv("RIP_NICE", "15"))
+
 # "Update available" indicator. When the running checkout is behind its git
 # upstream the topbar shows a badge (see static/updates.js). Both settings
 # are optional; the check degrades to no badge on any error.

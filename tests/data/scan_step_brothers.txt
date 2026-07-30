@@ -1,0 +1,556 @@
+JSON Title Set: {
+  "MainFeature": -1,
+  "TitleList": [
+    {
+      "AngleCount": 1,
+      "AudioList": [
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": false,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 448000,
+          "ChannelCount": 6,
+          "ChannelLayout": "5.1(side)",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "English (AC3, 5.1 ch, 448 kbps)",
+          "LFECount": 1,
+          "Language": "English",
+          "LanguageCode": "eng",
+          "SampleRate": 48000,
+          "TrackNumber": 1
+        },
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": false,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 448000,
+          "ChannelCount": 6,
+          "ChannelLayout": "5.1(side)",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "Francais (AC3, 5.1 ch, 448 kbps)",
+          "LFECount": 1,
+          "Language": "Francais",
+          "LanguageCode": "fra",
+          "SampleRate": 48000,
+          "TrackNumber": 2
+        },
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": true,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 192000,
+          "ChannelCount": 2,
+          "ChannelLayout": "stereo",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "English (AC3, Director's Commentary 1, 2.0 ch, 192 kbps)",
+          "LFECount": 0,
+          "Language": "English",
+          "LanguageCode": "eng",
+          "Name": "Commentary",
+          "SampleRate": 48000,
+          "TrackNumber": 3
+        }
+      ],
+      "ChapterList": [
+        {
+          "Duration": {
+            "Hours": 0,
+            "Minutes": 3,
+            "Seconds": 52,
+            "Ticks": 20909970
+          },
+          "Name": "Chapter 1"
+        },
+        {
+          "Duration": {
+            "Hours": 0,
+            "Minutes": 3,
+            "Seconds": 57,
+            "Ticks": 21321000
+          },
+          "Name": "Chapter 2"
+        }
+      ],
+      "Color": {
+        "BitDepth": 8,
+        "ChromaLocation": 1,
+        "ChromaSubsampling": "4:2:0",
+        "Format": 0,
+        "Matrix": 6,
+        "Primary": 6,
+        "Range": 1,
+        "Transfer": 1
+      },
+      "Crop": [
+        64,
+        62,
+        0,
+        0
+      ],
+      "Duration": {
+        "Hours": 1,
+        "Minutes": 45,
+        "Seconds": 26,
+        "Ticks": 569387970
+      },
+      "FrameRate": {
+        "Den": 1126125,
+        "Num": 27000000
+      },
+      "Geometry": {
+        "Height": 480,
+        "PAR": {
+          "Den": 27,
+          "Num": 32
+        },
+        "Width": 720
+      },
+      "Index": 1,
+      "InterlaceDetected": false,
+      "KeepDuplicateTitles": false,
+      "LooseCrop": [
+        64,
+        62,
+        0,
+        0
+      ],
+      "Metadata": {},
+      "Name": "Step_Brothers",
+      "Path": "/dev/sr1",
+      "Playlist": -1,
+      "SubtitleList": [
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": false,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": true,
+            "PanScan": false,
+            "Wide": true
+          },
+          "Format": "bitmap",
+          "Language": "English (Wide Screen) [VOBSUB]",
+          "LanguageCode": "eng",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "TrackNumber": 1
+        },
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": false,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": true,
+            "PanScan": false,
+            "Wide": true
+          },
+          "Format": "bitmap",
+          "Language": "Francais (Wide Screen) [VOBSUB]",
+          "LanguageCode": "fra",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "TrackNumber": 2
+        },
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": false,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": true,
+            "PanScan": false,
+            "Wide": true
+          },
+          "Format": "bitmap",
+          "Language": "Francais (Wide Screen) [VOBSUB]",
+          "LanguageCode": "fra",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "TrackNumber": 3
+        },
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": true,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": false,
+            "PanScan": false,
+            "Wide": false
+          },
+          "Format": "text",
+          "Language": "English, Closed Caption [CC608]",
+          "LanguageCode": "eng",
+          "Source": 1,
+          "SourceName": "CC608",
+          "TrackNumber": 4
+        }
+      ],
+      "Type": 0,
+      "VideoCodec": "mpeg2video"
+    },
+    {
+      "AngleCount": 1,
+      "AudioList": [
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": false,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 448000,
+          "ChannelCount": 6,
+          "ChannelLayout": "5.1(side)",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "English (AC3, 5.1 ch, 448 kbps)",
+          "LFECount": 1,
+          "Language": "English",
+          "LanguageCode": "eng",
+          "SampleRate": 48000,
+          "TrackNumber": 1
+        },
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": false,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 448000,
+          "ChannelCount": 6,
+          "ChannelLayout": "5.1(side)",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "Francais (AC3, 5.1 ch, 448 kbps)",
+          "LFECount": 1,
+          "Language": "Francais",
+          "LanguageCode": "fra",
+          "SampleRate": 48000,
+          "TrackNumber": 2
+        },
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": true,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 192000,
+          "ChannelCount": 2,
+          "ChannelLayout": "stereo",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "English (AC3, Director's Commentary 1, 2.0 ch, 192 kbps)",
+          "LFECount": 0,
+          "Language": "English",
+          "LanguageCode": "eng",
+          "Name": "Commentary",
+          "SampleRate": 48000,
+          "TrackNumber": 3
+        }
+      ],
+      "ChapterList": [
+        {
+          "Duration": {
+            "Hours": 0,
+            "Minutes": 3,
+            "Seconds": 52,
+            "Ticks": 20909970
+          },
+          "Name": "Chapter 1"
+        },
+        {
+          "Duration": {
+            "Hours": 0,
+            "Minutes": 3,
+            "Seconds": 57,
+            "Ticks": 21321000
+          },
+          "Name": "Chapter 2"
+        }
+      ],
+      "Color": {
+        "BitDepth": 8,
+        "ChromaLocation": 1,
+        "ChromaSubsampling": "4:2:0",
+        "Format": 0,
+        "Matrix": 6,
+        "Primary": 6,
+        "Range": 1,
+        "Transfer": 1
+      },
+      "Crop": [
+        64,
+        62,
+        0,
+        0
+      ],
+      "Duration": {
+        "Hours": 1,
+        "Minutes": 37,
+        "Seconds": 42,
+        "Ticks": 527655060
+      },
+      "FrameRate": {
+        "Den": 1126125,
+        "Num": 27000000
+      },
+      "Geometry": {
+        "Height": 480,
+        "PAR": {
+          "Den": 27,
+          "Num": 32
+        },
+        "Width": 720
+      },
+      "Index": 2,
+      "InterlaceDetected": false,
+      "KeepDuplicateTitles": false,
+      "LooseCrop": [
+        64,
+        62,
+        0,
+        0
+      ],
+      "Metadata": {},
+      "Name": "Step_Brothers",
+      "Path": "/dev/sr1",
+      "Playlist": -1,
+      "SubtitleList": [
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": false,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": true,
+            "PanScan": false,
+            "Wide": true
+          },
+          "Format": "bitmap",
+          "Language": "English (Wide Screen) [VOBSUB]",
+          "LanguageCode": "eng",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "TrackNumber": 1
+        },
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": false,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": true,
+            "PanScan": false,
+            "Wide": true
+          },
+          "Format": "bitmap",
+          "Language": "Francais (Wide Screen) [VOBSUB]",
+          "LanguageCode": "fra",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "TrackNumber": 2
+        },
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": false,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": true,
+            "PanScan": false,
+            "Wide": true
+          },
+          "Format": "bitmap",
+          "Language": "Francais (Wide Screen) [VOBSUB]",
+          "LanguageCode": "fra",
+          "Source": 0,
+          "SourceName": "VOBSUB",
+          "TrackNumber": 3
+        },
+        {
+          "Attributes": {
+            "4By3": false,
+            "Children": false,
+            "ClosedCaption": true,
+            "Commentary": false,
+            "Default": false,
+            "Forced": false,
+            "Large": false,
+            "Letterbox": false,
+            "Normal": false,
+            "PanScan": false,
+            "Wide": false
+          },
+          "Format": "text",
+          "Language": "English, Closed Caption [CC608]",
+          "LanguageCode": "eng",
+          "Source": 1,
+          "SourceName": "CC608",
+          "TrackNumber": 4
+        }
+      ],
+      "Type": 0,
+      "VideoCodec": "mpeg2video"
+    },
+    {
+      "AngleCount": 1,
+      "AudioList": [
+        {
+          "Attributes": {
+            "AltCommentary": false,
+            "Commentary": false,
+            "Default": false,
+            "Normal": false,
+            "Secondary": false,
+            "VisuallyImpaired": false
+          },
+          "BitRate": 192000,
+          "ChannelCount": 2,
+          "ChannelLayout": "stereo",
+          "Codec": 2048,
+          "CodecName": "ac3",
+          "CodecParam": 86019,
+          "Description": "English (AC3, 2.0 ch, 192 kbps)",
+          "LFECount": 0,
+          "Language": "English",
+          "LanguageCode": "eng",
+          "SampleRate": 48000,
+          "TrackNumber": 1
+        }
+      ],
+      "ChapterList": [
+        {
+          "Duration": {
+            "Hours": 0,
+            "Minutes": 0,
+            "Seconds": 10,
+            "Ticks": 855000
+          },
+          "Name": "Chapter 1"
+        },
+        {
+          "Duration": {
+            "Hours": 0,
+            "Minutes": 0,
+            "Seconds": 17,
+            "Ticks": 1500030
+          },
+          "Name": "Chapter 2"
+        }
+      ],
+      "Color": {
+        "BitDepth": 8,
+        "ChromaLocation": 1,
+        "ChromaSubsampling": "4:2:0",
+        "Format": 0,
+        "Matrix": 6,
+        "Primary": 6,
+        "Range": 1,
+        "Transfer": 1
+      },
+      "Crop": [
+        2,
+        0,
+        98,
+        0
+      ],
+      "Duration": {
+        "Hours": 0,
+        "Minutes": 0,
+        "Seconds": 48,
+        "Ticks": 4320000
+      },
+      "FrameRate": {
+        "Den": 900900,
+        "Num": 27000000
+      },
+      "Geometry": {
+        "Height": 480,
+        "PAR": {
+          "Den": 27,
+          "Num": 32
+        },
+        "Width": 720
+      },
+      "Index": 5,
+      "InterlaceDetected": false,
+      "KeepDuplicateTitles": false,
+      "LooseCrop": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "Metadata": {},
+      "Name": "Step_Brothers",
+      "Path": "/dev/sr1",
+      "Playlist": -1,
+      "SubtitleList": [],
+      "Type": 0,
+      "VideoCodec": "mpeg2video"
+    }
+  ]
+}

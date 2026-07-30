@@ -108,7 +108,27 @@ CREATE TABLE IF NOT EXISTS torrent_traffic (
     PRIMARY KEY (bucket_epoch, hash)
 ) WITHOUT ROWID;
 
+-- Finished DVD rips (Rips tab). Keyed by nothing in Transmission — a rip is
+-- independent of any torrent — so this is a standalone log rather than
+-- another column on copy_history.
+CREATE TABLE IF NOT EXISTS rip_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    disc_label TEXT,
+    output_name TEXT,
+    output_path TEXT,
+    device TEXT,
+    title_index INTEGER,
+    preset TEXT,
+    started_at TEXT,
+    finished_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_seconds INTEGER DEFAULT 0,
+    output_bytes INTEGER DEFAULT 0,
+    error_message TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_copy_history_finished ON copy_history(finished_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rip_history_finished ON rip_history(finished_at DESC);
 CREATE INDEX IF NOT EXISTS idx_unloaded_torrents_at ON unloaded_torrents(unloaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_removed_torrents_removed ON removed_torrents(removed_at DESC);
@@ -267,6 +287,40 @@ def log_event(type, severity, message, torrent_id=None, torrent_name=None, detai
                 json.dumps(details) if details else None,
             ),
         )
+
+
+def record_rip(**fields):
+    with _tx() as c:
+        c.execute(
+            """INSERT INTO rip_history
+            (disc_label, output_name, output_path, device, title_index, preset,
+             started_at, finished_at, status, duration_seconds, output_bytes,
+             error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                fields.get("disc_label"),
+                fields.get("output_name"),
+                fields.get("output_path"),
+                fields.get("device"),
+                int(fields["title_index"]) if fields.get("title_index") else None,
+                fields.get("preset"),
+                fields.get("started_at"),
+                fields.get("finished_at") or _now_iso(),
+                fields.get("status") or "unknown",
+                int(fields.get("duration_seconds") or 0),
+                int(fields.get("output_bytes") or 0),
+                fields.get("error_message"),
+            ),
+        )
+
+
+def list_rips(limit=25):
+    c = _conn()
+    rows = c.execute(
+        "SELECT * FROM rip_history ORDER BY finished_at DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def list_copies(limit=50):

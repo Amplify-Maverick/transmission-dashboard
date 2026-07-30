@@ -4514,3 +4514,237 @@ body.checking .torrent-list { padding-bottom: 96px; }
         transition-duration: 0.01ms !important;
     }
 }
+
+/* ---------------------------------------------------------------------------
+   Rips tab (DVD ripping via HandBrakeCLI)
+   Reuses .settings-section / .settings-field / .progress from above; only the
+   drive card, title table and track lists are new.
+   --------------------------------------------------------------------------- */
+
+.rip-drive {
+    gap: 12px;
+}
+
+.rip-drive-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.rip-drive-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-strong);
+}
+
+.rip-drive-sub {
+    margin: 4px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.rip-drive-sub code {
+    font-family: var(--mono);
+    font-size: 11px;
+}
+
+.rip-drive-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.rip-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.rip-disc-state {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text);
+}
+
+.rip-job {
+    border-top: 1px solid var(--border);
+    padding-top: 4px;
+}
+
+.rip-job .rip-drive-actions {
+    margin-top: 10px;
+}
+
+.rip-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+}
+
+/* The title list can be long on a TV-series disc; cap it and scroll. */
+.rip-titles-wrap {
+    max-height: 320px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.rip-titles {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.rip-titles th {
+    position: sticky;
+    top: 0;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.rip-titles td {
+    padding: 7px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.rip-titles tbody tr {
+    cursor: pointer;
+}
+
+.rip-titles tbody tr:hover {
+    background: var(--panel-hover);
+}
+
+/* The longest title — what you almost always want. */
+.rip-titles tr.rip-title-main td {
+    color: var(--text-strong);
+    font-weight: 500;
+}
+
+.rip-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+}
+
+.rip-track-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 140px;
+    overflow: auto;
+}
+
+.rip-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    line-height: 1.4;
+}
+
+.rip-check input {
+    margin: 1px 0 0;
+    flex: 0 0 auto;
+}
+
+.rip-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+}
+
+.rip-history-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+}
+
+.rip-history-row:last-child {
+    border-bottom: none;
+}
+
+.rip-history-name {
+    font-size: 13px;
+    color: var(--text-strong);
+    word-break: break-word;
+}
+
+.rip-history-meta {
+    grid-column: 1;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.rip-history-row .rip-badge {
+    grid-row: 1 / span 2;
+    grid-column: 2;
+}
+
+.rip-history-row[data-status="error"] .rip-badge,
+.rip-history-row[data-status="interrupted"] .rip-badge {
+    color: var(--red);
+    border-color: var(--red);
+}
+
+.rip-history-row[data-status="done"] .rip-badge {
+    color: var(--green);
+    border-color: var(--green);
+}
+
+/* File has since been moved or deleted (e.g. copied to the media server). */
+.rip-history-gone .rip-history-name {
+    color: var(--muted);
+    text-decoration: line-through;
+}
+
+@media (max-width: 640px) {
+    .rip-drive-header {
+        flex-direction: column;
+    }
+    .rip-drive-actions .btn {
+        flex: 1 1 0;
+        min-height: 36px;
+    }
+    /* Drop the least useful columns rather than side-scrolling the table. */
+    .rip-titles th:nth-child(4),
+    .rip-titles td:nth-child(4),
+    .rip-titles th:nth-child(5),
+    .rip-titles td:nth-child(5) {
+        display: none;
+    }
+    .rip-options {
+        grid-template-columns: 1fr;
+    }
+    .rip-settings-grid {
+        grid-template-columns: 1fr;
+    }
+}

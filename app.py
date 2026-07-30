@@ -35,11 +35,20 @@ from flask import (
 
 import config
 import db
+import handbrake
 
 if config.USE_MOCK:
     from mock_transmission import MockTransmissionClient as TransmissionClient
 else:
     from transmission import TransmissionClient
+
+# The dev box has no optical drive and no HandBrakeCLI, so USE_MOCK swaps in a
+# fake backend to keep the Rips tab buildable locally. Parsing helpers always
+# come from handbrake itself; only the drive/process I/O is mocked.
+if config.USE_MOCK:
+    from mock_handbrake import MockHandBrake as _HandBrakeBackend
+else:
+    from handbrake import HandBrake as _HandBrakeBackend
 
 app = Flask(__name__)
 app.secret_key = config.FLASK_SECRET_KEY
@@ -51,6 +60,7 @@ DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "")
 
 client = TransmissionClient()
+hb = _HandBrakeBackend()
 
 db.init()
 
@@ -6100,6 +6110,759 @@ def api_copy_preflight(tid):
         "disks": disks,
         "chosen_path": chosen,
     })
+
+
+# ---------- DVD ripping (Rips tab) ----------
+#
+# Shells out to HandBrakeCLI on this host. Scans and encodes both run in
+# background threads with per-device state in rip_state.json, mirroring the
+# copy worker: an in-memory cache serves the polling API, progress ticks skip
+# the disk flush, and terminal states force-persist so a crash can be
+# reconciled at startup.
+
+RIP_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rip_state.json")
+
+_RIP_STATE_FLUSH_MIN_INTERVAL = 15.0
+_rip_state_lock = threading.Lock()
+_rip_state_cache = None
+_rip_state_last_flush = 0.0
+
+# device -> {"cancel": Event}
+_active_rips = {}
+_active_rips_lock = threading.Lock()
+
+# Scan results are big (every title, every track) and only valid while that
+# disc is in the drive, so they live in memory only — a restart just means
+# re-scanning. device -> {"status", "result", "error", "disc_label", "at"}
+_scan_jobs = {}
+_scan_jobs_lock = threading.Lock()
+
+_RIP_TERMINAL = ("done", "error", "cancelled", "interrupted")
+
+
+def _rip_settings():
+    """Rip preferences: app_config.json overrides, .env defaults."""
+    cfg = (_read_app_config().get("rip") or {})
+    out = {
+        "output_dir": cfg.get("output_dir") or config.RIP_OUTPUT_DIR,
+        "preset": cfg.get("preset") or handbrake.DEFAULT_PRESET,
+        "container": cfg.get("container") or handbrake.DEFAULT_CONTAINER,
+        "min_title_seconds": cfg.get("min_title_seconds", handbrake.DEFAULT_MIN_TITLE_SEC),
+        "eject_when_done": bool(cfg.get("eject_when_done", False)),
+        # Encoding is CPU-bound; running two at once on a 2-core box just
+        # makes both slow and starves transmission further.
+        "max_concurrent": cfg.get("max_concurrent", 1),
+        "nice": cfg.get("nice", config.RIP_NICE),
+    }
+    try:
+        out["min_title_seconds"] = max(0, int(out["min_title_seconds"]))
+    except (TypeError, ValueError):
+        out["min_title_seconds"] = handbrake.DEFAULT_MIN_TITLE_SEC
+    try:
+        out["max_concurrent"] = max(1, min(4, int(out["max_concurrent"])))
+    except (TypeError, ValueError):
+        out["max_concurrent"] = 1
+    try:
+        out["nice"] = max(0, min(19, int(out["nice"])))
+    except (TypeError, ValueError):
+        out["nice"] = config.RIP_NICE
+    if out["container"] not in handbrake.CONTAINERS:
+        out["container"] = handbrake.DEFAULT_CONTAINER
+    return out
+
+
+def _load_rip_state_from_disk():
+    if not os.path.exists(RIP_STATE_FILE):
+        return {}
+    try:
+        with open(RIP_STATE_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _ensure_rip_state_cache_unlocked():
+    global _rip_state_cache
+    if _rip_state_cache is None:
+        _rip_state_cache = _load_rip_state_from_disk()
+    return _rip_state_cache
+
+
+def _flush_rip_state_unlocked(force=False):
+    global _rip_state_last_flush
+    now = time.monotonic()
+    if not force and (now - _rip_state_last_flush) < _RIP_STATE_FLUSH_MIN_INTERVAL:
+        return
+    _atomic_write_json(RIP_STATE_FILE, _rip_state_cache)
+    _rip_state_last_flush = now
+
+
+def load_rip_state():
+    with _rip_state_lock:
+        cache = _ensure_rip_state_cache_unlocked()
+        return {k: dict(v) for k, v in cache.items()}
+
+
+def update_rip_entry(device, _persist=True, _replace=False, **fields):
+    """Merge fields into a device's rip-state entry.
+
+    _persist=False skips the disk flush (used by the progress callback, which
+    fires several times a second); _replace starts a fresh entry so a new rip
+    doesn't inherit the previous run's error or percentage.
+    """
+    with _rip_state_lock:
+        state = _ensure_rip_state_cache_unlocked()
+        entry = {} if _replace else (state.get(device) or {})
+        entry = dict(entry)
+        entry.update(fields)
+        entry["device"] = device
+        state[device] = entry
+        _flush_rip_state_unlocked(force=_persist)
+        return dict(entry)
+
+
+def _reconcile_interrupted_rips():
+    """Mark rips left mid-flight by a crash/restart as interrupted.
+
+    A HandBrake child dies with its parent, so any non-terminal entry on disk
+    at startup is stale by definition — unlike a copy, there is nothing to
+    resume, so the partial output is removed too.
+    """
+    state = load_rip_state()
+    stale = [d for d, e in state.items()
+             if (e.get("status") or "idle") not in _RIP_TERMINAL + ("idle",)]
+    for device in stale:
+        entry = state[device]
+        path = entry.get("output_path")
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        update_rip_entry(
+            device,
+            status="interrupted",
+            finished_at=_now_iso(),
+            error_message="dashboard restarted while ripping",
+        )
+        try:
+            db.log_event(
+                "rip.completed", "warn",
+                f"Rip of {entry.get('output_name') or device} was interrupted "
+                "by a dashboard restart",
+                details={"device": device, "status": "interrupted"},
+            )
+        except Exception:
+            pass
+    return stale
+
+
+def _rip_severity(status):
+    if status in ("done", "cancelled"):
+        return "info"
+    if status == "interrupted":
+        return "warn"
+    return "error"
+
+
+def _known_rip_device(device):
+    """Resolve a device string against the drives that actually exist.
+
+    HandBrake's --input takes any path, so the device must be validated
+    against the enumerated drives rather than passed through from the client.
+    """
+    device = (device or "").strip()
+    if not device:
+        return None
+    for d in hb.drives():
+        if d["device"] == device:
+            return d
+    return None
+
+
+def _rip_output_path(output_dir, name, ext):
+    """Absolute output path inside `output_dir`, avoiding collisions.
+
+    sanitize_filename already strips path separators; the realpath check is a
+    second line of defence so a name can never write outside the rip folder.
+    """
+    base = handbrake.sanitize_filename(name)
+    root = os.path.realpath(output_dir)
+    candidate = os.path.join(root, base + ext)
+    if os.path.realpath(os.path.dirname(candidate)) != root:
+        raise ValueError("invalid output name")
+    n = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(root, f"{base} ({n}){ext}")
+        n += 1
+    return candidate
+
+
+def _select_tracks(raw, available, what):
+    """Validate requested track numbers against the scanned title."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{what} must be a list of track numbers")
+    valid = {int(t["index"]) for t in available}
+    out = []
+    for t in raw:
+        try:
+            n = int(t)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid {what} track '{t}'")
+        if n not in valid:
+            raise ValueError(f"title has no {what} track {n}")
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _run_scan(device, min_seconds):
+    def finish(**fields):
+        with _scan_jobs_lock:
+            job = _scan_jobs.get(device) or {}
+            job.update(fields)
+            job["at"] = _now_iso()
+            _scan_jobs[device] = job
+
+    try:
+        result = hb.scan(device, min_seconds=min_seconds)
+    except handbrake.HandBrakeError as e:
+        finish(status="error", error=str(e), result=None)
+        return
+    except Exception as e:  # noqa: BLE001 - a scan must never kill the thread
+        finish(status="error", error=f"unexpected scan failure: {e}", result=None)
+        return
+    finish(status="done", error=None, result=result)
+
+
+def _run_rip(device, title, output_path, preset, container, audio, subtitles,
+             burn_subtitle, chapters, disc_label, title_seconds, settings):
+    """Encode one title. Owns the _active_rips slot reserved by api_rip_start."""
+    with _active_rips_lock:
+        info = _active_rips.get(device)
+        if info is None:
+            info = {"cancel": threading.Event()}
+            _active_rips[device] = info
+    cancel_event = info["cancel"]
+
+    started_at = _now_iso()
+    update_rip_entry(
+        device, _replace=True,
+        status="ripping", phase="starting", percent=0.0,
+        disc_label=disc_label, title_index=title, preset=preset,
+        container=container, output_path=output_path,
+        output_name=os.path.basename(output_path),
+        title_seconds=title_seconds, started_at=started_at,
+    )
+
+    def on_progress(p):
+        state = p.get("state")
+        if state == "WORKDONE":
+            return
+        fields = {"phase": (state or "").lower() or None}
+        if "percent" in p:
+            fields["percent"] = p["percent"]
+        for k in ("fps", "avg_fps", "eta_seconds", "pass", "pass_count"):
+            if k in p:
+                fields[k] = p[k]
+        # Progress fires several times a second — never touch the disk here.
+        update_rip_entry(device, _persist=False, **fields)
+
+    status = "error"
+    error_message = None
+    out_bytes = 0
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        cmd = handbrake.rip_command(
+            device, title, output_path, preset=preset, container=container,
+            audio=audio, subtitles=subtitles, burn_subtitle=burn_subtitle,
+            chapters=chapters, nice=settings["nice"],
+        )
+        rc, log_tail = hb.run_rip(
+            cmd, on_progress=on_progress, cancelled=cancel_event.is_set,
+        )
+        if cancel_event.is_set():
+            status = "cancelled"
+        elif rc == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            status = "done"
+            out_bytes = os.path.getsize(output_path)
+        else:
+            status = "error"
+            error_message = _rip_error_message(rc, log_tail)
+    except handbrake.HandBrakeError as e:
+        error_message = str(e)
+    except Exception as e:  # noqa: BLE001
+        error_message = f"unexpected failure: {e}"
+    finally:
+        # A cancelled or failed encode leaves an unplayable partial file.
+        # There's nothing to resume from, so don't leave it in the library.
+        if status != "done":
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+        update_rip_entry(
+            device,
+            status=status,
+            phase=None,
+            percent=100.0 if status == "done" else None,
+            eta_seconds=None,
+            fps=None,
+            finished_at=_now_iso(),
+            output_bytes=out_bytes,
+            error_message=error_message,
+        )
+        with _active_rips_lock:
+            _active_rips.pop(device, None)
+        _finalize_rip(device, status, started_at, disc_label, title,
+                      preset, output_path, title_seconds, out_bytes,
+                      error_message, settings)
+
+
+def _rip_error_message(rc, log_tail):
+    """Best available explanation for a failed encode."""
+    for line in reversed(log_tail or []):
+        low = line.lower()
+        if any(w in low for w in ("error", "failed", "no such", "permission",
+                                  "no space", "denied")):
+            return line.strip()[:300]
+    return f"HandBrake exited with code {rc}"
+
+
+def _finalize_rip(device, status, started_at, disc_label, title, preset,
+                  output_path, title_seconds, out_bytes, error_message,
+                  settings):
+    try:
+        db.record_rip(
+            disc_label=disc_label,
+            output_name=os.path.basename(output_path),
+            output_path=output_path if status == "done" else None,
+            device=device,
+            title_index=title,
+            preset=preset,
+            started_at=started_at,
+            finished_at=_now_iso(),
+            status=status,
+            duration_seconds=title_seconds,
+            output_bytes=out_bytes,
+            error_message=error_message,
+        )
+        name = os.path.basename(output_path)
+        if status == "done":
+            msg = f"Ripped {name} ({_human_bytes(out_bytes)})"
+        elif status == "cancelled":
+            msg = f"Rip of {name} cancelled by user"
+        else:
+            msg = f"Rip of {name} failed: {error_message or 'unknown error'}"
+        db.log_event(
+            "rip.completed", _rip_severity(status), msg,
+            details={
+                "device": device, "status": status, "preset": preset,
+                "title": title, "output_bytes": out_bytes,
+                "disc_label": disc_label,
+            },
+        )
+    except Exception:
+        pass
+    if status == "done" and settings.get("eject_when_done"):
+        try:
+            hb.eject(device)
+        except handbrake.HandBrakeError:
+            pass
+
+
+def _human_bytes(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def _run_startup_rip_reconcile():
+    """Startup hook for _reconcile_interrupted_rips(). Never aborts boot."""
+    try:
+        _reconcile_interrupted_rips()
+    except Exception as e:
+        print(f"[startup] rip-state reconcile failed: {e}", file=sys.stderr)
+
+
+_run_startup_rip_reconcile()
+
+
+@app.route("/rips")
+@login_required
+def rips():
+    return render_template("rips.html")
+
+
+@app.route("/api/rip/overview")
+@login_required
+def api_rip_overview():
+    """Everything the Rips tab polls: drives, disc state, scan + rip status."""
+    settings = _rip_settings()
+    available = hb.available()
+
+    output_dir = settings["output_dir"]
+    dir_writable = os.access(output_dir, os.W_OK) if os.path.isdir(output_dir) else False
+    # An unwritable/missing output dir is the most common misconfiguration —
+    # report whether the *parent* is writable so the UI can say "will be
+    # created" instead of a bare failure.
+    if not os.path.isdir(output_dir):
+        parent = os.path.dirname(os.path.abspath(output_dir)) or "/"
+        dir_creatable = os.access(parent, os.W_OK)
+    else:
+        dir_creatable = dir_writable
+    free_bytes = None
+    try:
+        probe = output_dir if os.path.isdir(output_dir) else \
+            (os.path.dirname(os.path.abspath(output_dir)) or "/")
+        free_bytes = psutil.disk_usage(probe).free
+    except OSError:
+        pass
+
+    rip_state = load_rip_state()
+    drives = hb.drives() if available else []
+    with _scan_jobs_lock:
+        scans = {d: dict(j) for d, j in _scan_jobs.items()}
+    with _active_rips_lock:
+        active = set(_active_rips)
+
+    out = []
+    for d in drives:
+        device = d["device"]
+        scan = scans.get(device) or {}
+        result = scan.get("result") or {}
+        # A scan describes the disc that was in the drive when it ran. If the
+        # label changed (disc swapped) the cached titles are wrong.
+        stale = bool(scan) and scan.get("disc_label") != d.get("disc_label")
+        entry = dict(rip_state.get(device) or {})
+        entry["active"] = device in active
+        out.append(dict(d, job=entry, scan={
+            "status": scan.get("status"),
+            "error": scan.get("error"),
+            "at": scan.get("at"),
+            "stale": stale,
+            "title_count": len(result.get("titles") or []),
+            "disc_name": result.get("disc_name"),
+            "main_index": result.get("main_index"),
+        }))
+
+    return jsonify({
+        "ok": True,
+        "available": available,
+        "cli": config.HANDBRAKE_CLI,
+        "version": _rip_version_cached(),
+        "settings": settings,
+        "output_dir_writable": dir_writable,
+        "output_dir_creatable": dir_creatable,
+        "output_dir_free": free_bytes,
+        "containers": sorted(handbrake.CONTAINERS),
+        "drives": out,
+        "active_count": len(active),
+    })
+
+
+# HandBrakeCLI --version spawns libhb and takes ~1s; the overview endpoint is
+# polled, so the answer is cached for the life of the process.
+_rip_version = None
+_rip_version_lock = threading.Lock()
+
+
+def _rip_version_cached():
+    global _rip_version
+    with _rip_version_lock:
+        if _rip_version is None:
+            _rip_version = hb.version() or ""
+        return _rip_version or None
+
+
+@app.route("/api/rip/presets")
+@login_required
+def api_rip_presets():
+    return jsonify({"ok": True, "groups": _rip_presets_cached()})
+
+
+_rip_presets = None
+_rip_presets_lock = threading.Lock()
+
+
+def _rip_presets_cached():
+    global _rip_presets
+    with _rip_presets_lock:
+        if _rip_presets is None:
+            _rip_presets = hb.presets()
+        return _rip_presets
+
+
+@app.route("/api/rip/titles")
+@login_required
+def api_rip_titles():
+    device = (request.args.get("device") or "").strip()
+    with _scan_jobs_lock:
+        job = dict(_scan_jobs.get(device) or {})
+    if not job:
+        return _err("no scan has been run for this drive", 404)
+    if job.get("status") == "scanning":
+        return jsonify({"ok": True, "status": "scanning", "titles": []})
+    if job.get("status") == "error":
+        return _err(job.get("error") or "scan failed", 409)
+    result = job.get("result") or {}
+    return jsonify({
+        "ok": True,
+        "status": "done",
+        "at": job.get("at"),
+        "disc_name": result.get("disc_name"),
+        "main_index": result.get("main_index"),
+        "titles": result.get("titles") or [],
+    })
+
+
+@app.route("/api/rip/scan", methods=["POST"])
+@login_required
+def api_rip_scan():
+    if not hb.available():
+        return _err("HandBrakeCLI is not installed on this host", 400)
+    data = request.get_json(silent=True) or {}
+    drive = _known_rip_device(data.get("device"))
+    if drive is None:
+        return _err("unknown drive", 400)
+    if not drive["has_disc"]:
+        return _err("no disc in that drive", 400)
+    if drive.get("media_state") and drive["media_state"] != "complete":
+        return _err(
+            f"the drive is still reading the disc ({drive['media_state']}) — "
+            "try again in a moment", 409)
+    device = drive["device"]
+    with _active_rips_lock:
+        if device in _active_rips:
+            return _err("that drive is busy ripping", 409)
+    with _scan_jobs_lock:
+        if (_scan_jobs.get(device) or {}).get("status") == "scanning":
+            return _err("a scan is already running for that drive", 409)
+        _scan_jobs[device] = {
+            "status": "scanning", "error": None, "result": None,
+            "disc_label": drive.get("disc_label"), "at": _now_iso(),
+        }
+    threading.Thread(
+        target=_run_scan,
+        args=(device, _rip_settings()["min_title_seconds"]),
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "status": "scanning"})
+
+
+@app.route("/api/rip/start", methods=["POST"])
+@login_required
+def api_rip_start():
+    if not hb.available():
+        return _err("HandBrakeCLI is not installed on this host", 400)
+    data = request.get_json(silent=True) or {}
+    drive = _known_rip_device(data.get("device"))
+    if drive is None:
+        return _err("unknown drive", 400)
+    device = drive["device"]
+    if not drive["has_disc"]:
+        return _err("no disc in that drive", 400)
+
+    with _scan_jobs_lock:
+        job = dict(_scan_jobs.get(device) or {})
+    if job.get("status") != "done":
+        return _err("scan the disc before ripping", 409)
+    result = job.get("result") or {}
+    if job.get("disc_label") != drive.get("disc_label"):
+        return _err("the disc changed since the last scan — scan again", 409)
+
+    try:
+        title_index = int(data.get("title"))
+    except (TypeError, ValueError):
+        return _err("title is required", 400)
+    title = next((t for t in result.get("titles") or []
+                  if int(t["index"]) == title_index), None)
+    if title is None:
+        return _err(f"the disc has no title {title_index}", 400)
+
+    settings = _rip_settings()
+    preset = (data.get("preset") or settings["preset"]).strip()
+    if not preset:
+        return _err("preset is required", 400)
+    # Guard against a typo'd preset name, which HandBrake would otherwise
+    # only reject a second into the encode.
+    known = {p["name"] for g in _rip_presets_cached() for p in g["presets"]}
+    if known and preset not in known:
+        return _err(f"unknown preset '{preset}'", 400)
+
+    container = (data.get("container") or settings["container"]).strip()
+    if container not in handbrake.CONTAINERS:
+        return _err("container must be one of: "
+                    + ", ".join(sorted(handbrake.CONTAINERS)), 400)
+
+    try:
+        audio = _select_tracks(data.get("audio"), title["audio"], "audio")
+        subtitles = _select_tracks(data.get("subtitles"), title["subtitles"],
+                                   "subtitle")
+    except ValueError as e:
+        return _err(str(e), 400)
+    if not audio and title["audio"]:
+        audio = [int(title["audio"][0]["index"])]
+    burn_subtitle = bool(data.get("burn_subtitle")) and bool(subtitles)
+    if container == "mp4" and subtitles and not burn_subtitle:
+        # DVD subtitles are VOBSUB bitmaps, which MP4 cannot carry — the
+        # tracks would be silently dropped.
+        return _err("MP4 cannot store DVD (VOBSUB) subtitles — use MKV, or "
+                    "burn the subtitle into the picture", 400)
+    chapters = data.get("chapters")
+    chapters = True if chapters is None else bool(chapters)
+
+    name = data.get("name") or drive.get("disc_label") or "disc"
+    try:
+        output_path = _rip_output_path(
+            settings["output_dir"], name, handbrake.output_extension(container))
+    except ValueError as e:
+        return _err(str(e), 400)
+
+    try:
+        os.makedirs(settings["output_dir"], exist_ok=True)
+    except OSError as e:
+        return _err(f"cannot create output directory: {e}", 400)
+    if not os.access(settings["output_dir"], os.W_OK):
+        return _err(f"output directory is not writable: {settings['output_dir']}",
+                    400)
+
+    # Reserve the drive (and check the global cap) before spawning, so two
+    # quick clicks can't launch two encodes.
+    with _active_rips_lock:
+        if device in _active_rips:
+            return _err("that drive is already ripping", 409)
+        if len(_active_rips) >= settings["max_concurrent"]:
+            return _err(
+                f"already running {len(_active_rips)} rip(s) — the limit is "
+                f"{settings['max_concurrent']}", 409)
+        _active_rips[device] = {"cancel": threading.Event()}
+
+    try:
+        threading.Thread(
+            target=_run_rip,
+            args=(device, title_index, output_path, preset, container, audio,
+                  subtitles, burn_subtitle, chapters, drive.get("disc_label"),
+                  title.get("duration_seconds") or 0, settings),
+            daemon=True,
+        ).start()
+    except Exception as e:  # noqa: BLE001 - never leak the reservation
+        with _active_rips_lock:
+            _active_rips.pop(device, None)
+        return _err(f"could not start rip: {e}")
+
+    return jsonify({
+        "ok": True,
+        "device": device,
+        "output_name": os.path.basename(output_path),
+        "output_path": output_path,
+    })
+
+
+@app.route("/api/rip/stop", methods=["POST"])
+@login_required
+def api_rip_stop():
+    data = request.get_json(silent=True) or {}
+    device = (data.get("device") or "").strip()
+    with _active_rips_lock:
+        info = _active_rips.get(device)
+        if info is None:
+            return _err("no rip is running for that drive", 404)
+        info["cancel"].set()
+    update_rip_entry(device, phase="cancelling")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/rip/eject", methods=["POST"])
+@login_required
+def api_rip_eject():
+    data = request.get_json(silent=True) or {}
+    drive = _known_rip_device(data.get("device"))
+    if drive is None:
+        return _err("unknown drive", 400)
+    device = drive["device"]
+    with _active_rips_lock:
+        if device in _active_rips:
+            return _err("that drive is busy ripping", 409)
+    try:
+        hb.eject(device)
+    except handbrake.HandBrakeError as e:
+        return _err(str(e), 400)
+    # The cached titles describe a disc that is no longer in the drive.
+    with _scan_jobs_lock:
+        _scan_jobs.pop(device, None)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/rip/history")
+@login_required
+def api_rip_history():
+    try:
+        limit = min(100, max(1, int(request.args.get("limit", 25))))
+    except (TypeError, ValueError):
+        limit = 25
+    rips = db.list_rips(limit)
+    for r in rips:
+        # Let the UI grey out entries whose file has since been moved or
+        # deleted (e.g. copied onto the media server and removed here).
+        r["exists"] = bool(r.get("output_path")) and os.path.exists(r["output_path"])
+    return jsonify({"ok": True, "rips": rips})
+
+
+@app.route("/api/rip/config", methods=["GET"])
+@login_required
+def api_rip_config_get():
+    return jsonify({"ok": True, "settings": _rip_settings()})
+
+
+@app.route("/api/rip/config", methods=["POST"])
+@login_required
+def api_rip_config_set():
+    data = request.get_json(silent=True) or {}
+    cfg = _read_app_config()
+    rip = dict(cfg.get("rip") or {})
+
+    if "output_dir" in data:
+        path = (data.get("output_dir") or "").strip()
+        if not path:
+            return _err("output directory is required", 400)
+        if not os.path.isabs(path):
+            return _err("output directory must be an absolute path", 400)
+        rip["output_dir"] = os.path.normpath(path)
+    if "preset" in data:
+        preset = (data.get("preset") or "").strip()
+        if not preset:
+            return _err("preset is required", 400)
+        rip["preset"] = preset
+    if "container" in data:
+        container = (data.get("container") or "").strip()
+        if container not in handbrake.CONTAINERS:
+            return _err("container must be one of: "
+                        + ", ".join(sorted(handbrake.CONTAINERS)), 400)
+        rip["container"] = container
+    for key, lo, hi in (("min_title_seconds", 0, 3600),
+                        ("max_concurrent", 1, 4),
+                        ("nice", 0, 19)):
+        if key in data:
+            try:
+                val = int(data[key])
+            except (TypeError, ValueError):
+                return _err(f"{key} must be a number", 400)
+            if not lo <= val <= hi:
+                return _err(f"{key} must be between {lo} and {hi}", 400)
+            rip[key] = val
+    if "eject_when_done" in data:
+        rip["eject_when_done"] = bool(data["eject_when_done"])
+
+    cfg["rip"] = rip
+    _write_app_config(cfg)
+    return jsonify({"ok": True, "settings": _rip_settings()})
 
 
 if __name__ == "__main__":

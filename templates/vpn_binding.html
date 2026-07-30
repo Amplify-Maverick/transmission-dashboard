@@ -14,6 +14,7 @@
             <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
             <a href="{{ url_for('system') }}" class="nav-link">Stats</a>
             <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('rips') }}" class="nav-link">Rips</a>
             <a href="{{ url_for('events') }}" class="nav-link">Events</a>
             <a href="{{ url_for('settings') }}" class="nav-link active">Settings</a>
         </nav>
@@ -383,6 +384,7 @@ sudo iptables -C OUTPUT -m mark --mark 0xca6c -j ACCEPT &amp;&amp; echo present 
 
     <div class="more-sheet" id="more-sheet" hidden>
         <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('rips') }}" class="more-sheet-item">Rips</a>
             <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
             <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
             <div class="more-sheet-sep"></div>

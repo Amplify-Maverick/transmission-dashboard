@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0d1117">
+    <title>Rips — transmission-dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">transmission-dashboard</div>
+        <nav class="primary-nav">
+            <a href="{{ url_for('index') }}" class="nav-link">Torrents</a>
+            <a href="{{ url_for('system') }}" class="nav-link">Stats</a>
+            <a href="{{ url_for('history') }}" class="nav-link">History</a>
+            <a href="{{ url_for('rips') }}" class="nav-link active">Rips</a>
+            <a href="{{ url_for('events') }}" class="nav-link">Events</a>
+            <a href="{{ url_for('settings') }}" class="nav-link">Settings</a>
+        </nav>
+        <div class="topbar-actions">
+            <span id="tunnel-indicator" class="tunnel" data-state="unknown" title="Checking tunnel…">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Tunnel ?</span>
+            </span>
+            <a id="tracker-test-indicator" class="tunnel" data-state="unknown"
+               href="{{ url_for('system') }}" hidden title="Tracker IP test">
+                <span class="tunnel-dot" data-state="unknown"></span>
+                <span class="tunnel-label">Test ?</span>
+            </a>
+            <div class="live">
+                <span class="live-dot" data-state="ok"></span>
+                <span class="live-label">Live</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-link" title="Log out">Logout</a>
+        </div>
+    </header>
+
+    <main class="settings-page">
+        <div class="settings-container">
+
+            <div class="form-error" id="rip-error" hidden></div>
+
+            <!-- Shown instead of the controls when HandBrakeCLI isn't on the host. -->
+            <section class="settings-section" id="rip-unavailable" hidden>
+                <header class="settings-section-header">
+                    <h2 class="settings-section-title">HandBrake not found</h2>
+                    <p class="settings-section-hint">
+                        Ripping needs <code>HandBrakeCLI</code> on the machine running this
+                        dashboard. Install it with
+                        <code>sudo apt install handbrake-cli libdvd-pkg</code> (the second
+                        package builds <code>libdvdcss</code>, which is required to read
+                        encrypted retail DVDs), then reload this page. If it lives somewhere
+                        unusual, set <code>HANDBRAKE_CLI</code> in <code>.env</code>.
+                    </p>
+                </header>
+                <p class="field-hint">Looked for: <code id="rip-cli-path">HandBrakeCLI</code></p>
+            </section>
+
+            <div id="rip-main" hidden>
+                <section class="settings-section">
+                    <header class="settings-section-header">
+                        <h2 class="settings-section-title">Optical drives</h2>
+                        <p class="settings-section-hint">
+                            Insert a disc, scan it, then pick the title to encode. Rips are
+                            written to <code id="rip-output-dir">—</code>
+                            (<span id="rip-output-free">—</span> free)
+                            and run at low priority so they don't starve Transmission.
+                        </p>
+                    </header>
+                    <div class="form-error" id="rip-dir-warning" hidden></div>
+                    <div id="rip-drives"></div>
+                    <p class="field-hint" id="rip-no-drives" hidden>
+                        No optical drives found. Only <code>/dev/sr*</code> devices are
+                        detected — if you just plugged in a USB drive, reload the page.
+                    </p>
+                </section>
+
+                <section class="settings-section">
+                    <header class="settings-section-header">
+                        <h2 class="settings-section-title">Rip settings</h2>
+                        <p class="settings-section-hint">
+                            Defaults for new rips. The preset and container can still be
+                            changed per rip above.
+                        </p>
+                    </header>
+
+                    <div class="form-error" id="rip-settings-error" hidden></div>
+
+                    <div class="settings-field">
+                        <label class="field-label" for="rip-dir-input">Output directory</label>
+                        <input type="text" id="rip-dir-input" placeholder="/home/user/rips"
+                               autocomplete="off" spellcheck="false">
+                        <p class="field-hint">
+                            Absolute path, writable by the dashboard's service user. Created
+                            on first rip if missing.
+                        </p>
+                    </div>
+
+                    <div class="rip-settings-grid">
+                        <div class="settings-field">
+                            <label class="field-label" for="rip-default-preset">Default preset</label>
+                            <select id="rip-default-preset"></select>
+                        </div>
+                        <div class="settings-field">
+                            <label class="field-label" for="rip-default-container">Container</label>
+                            <select id="rip-default-container">
+                                <option value="mkv">MKV</option>
+                                <option value="mp4">MP4</option>
+                            </select>
+                            <p class="field-hint">MKV keeps DVD subtitles; MP4 cannot.</p>
+                        </div>
+                        <div class="settings-field">
+                            <label class="field-label" for="rip-nice">Encoder priority (nice)</label>
+                            <input type="number" id="rip-nice" min="0" max="19" step="1">
+                            <p class="field-hint">0 = normal, 19 = most background.</p>
+                        </div>
+                        <div class="settings-field">
+                            <label class="field-label" for="rip-min-title">Hide titles under (s)</label>
+                            <input type="number" id="rip-min-title" min="0" max="3600" step="5">
+                            <p class="field-hint">Filters menu loops and studio idents.</p>
+                        </div>
+                        <div class="settings-field">
+                            <label class="field-label" for="rip-max-concurrent">Concurrent rips</label>
+                            <input type="number" id="rip-max-concurrent" min="1" max="4" step="1">
+                            <p class="field-hint">Encoding is CPU-bound — 1 is usually fastest overall.</p>
+                        </div>
+                        <div class="settings-field">
+                            <label class="rip-check">
+                                <input type="checkbox" id="rip-eject-done">
+                                <span>Eject the disc when a rip finishes</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="settings-actions">
+                        <button type="button" class="btn" id="rip-settings-reset">Reset</button>
+                        <button type="button" class="btn btn-primary" id="rip-settings-save">Save</button>
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <header class="settings-section-header">
+                        <h2 class="settings-section-title">Recent rips</h2>
+                        <p class="settings-section-hint">
+                            The last 25 rips. Greyed-out entries no longer exist on disk.
+                        </p>
+                    </header>
+                    <div id="rip-history"></div>
+                    <p class="field-hint" id="rip-history-empty" hidden>No rips yet.</p>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <!-- One card per optical drive, cloned by rips.js. -->
+    <template id="rip-drive-template">
+        <section class="settings-section rip-drive" data-device="">
+            <header class="rip-drive-header">
+                <div>
+                    <h3 class="rip-drive-title" data-field="model">—</h3>
+                    <p class="rip-drive-sub">
+                        <code data-field="device">—</code>
+                        <span class="rip-badge" data-field="bus" hidden></span>
+                        <span class="rip-badge" data-field="media-type" hidden></span>
+                    </p>
+                </div>
+                <div class="rip-drive-actions">
+                    <button type="button" class="btn btn-sm" data-action="scan">Scan disc</button>
+                    <button type="button" class="btn btn-sm" data-action="eject">Eject</button>
+                </div>
+            </header>
+
+            <p class="rip-disc-state" data-field="disc-state">—</p>
+
+            <!-- Live encode -->
+            <div class="rip-job" data-field="job" hidden>
+                <div class="progress copy-progress">
+                    <div class="progress-fill" data-field="job-fill"></div>
+                </div>
+                <div class="copy-progress-meta">
+                    <span data-field="job-pct">0%</span>
+                    <span data-field="job-phase">—</span>
+                    <span data-field="job-fps">—</span>
+                    <span data-field="job-eta">—</span>
+                </div>
+                <div class="copy-progress-status" data-field="job-status">—</div>
+                <div class="rip-drive-actions">
+                    <button type="button" class="btn btn-sm btn-danger" data-action="cancel">Cancel rip</button>
+                </div>
+            </div>
+
+            <!-- Title picker + encode options, filled in after a scan -->
+            <div class="rip-setup" data-field="setup" hidden>
+                <div class="rip-titles-wrap">
+                    <table class="rip-titles">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>Title</th>
+                                <th>Length</th>
+                                <th>Chapters</th>
+                                <th>Video</th>
+                                <th>Tracks</th>
+                            </tr>
+                        </thead>
+                        <tbody data-field="titles"></tbody>
+                    </table>
+                </div>
+
+                <div class="rip-options">
+                    <div class="settings-field">
+                        <label class="field-label">Output name</label>
+                        <input type="text" data-field="name" autocomplete="off" spellcheck="false">
+                        <p class="field-hint">Saved as <code data-field="name-preview">—</code></p>
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label">Preset</label>
+                        <select data-field="preset"></select>
+                        <p class="field-hint" data-field="preset-hint"></p>
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label">Container</label>
+                        <select data-field="container">
+                            <option value="mkv">MKV</option>
+                            <option value="mp4">MP4</option>
+                        </select>
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label">Audio tracks</label>
+                        <div class="rip-track-list" data-field="audio"></div>
+                    </div>
+                    <div class="settings-field">
+                        <label class="field-label">Subtitles</label>
+                        <div class="rip-track-list" data-field="subtitles"></div>
+                        <label class="rip-check">
+                            <input type="checkbox" data-field="burn">
+                            <span>Burn the first selected subtitle into the picture</span>
+                        </label>
+                    </div>
+                    <div class="settings-field">
+                        <label class="rip-check">
+                            <input type="checkbox" data-field="chapters" checked>
+                            <span>Keep chapter markers</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="settings-actions">
+                    <button type="button" class="btn btn-primary" data-action="start">Start rip</button>
+                </div>
+            </div>
+        </section>
+    </template>
+
+    <div class="toast-container" id="toasts"></div>
+
+    <nav class="bottom-nav" aria-label="Sections">
+        <a href="{{ url_for('index') }}" class="bottom-nav-link">Torrents</a>
+        <a href="{{ url_for('system') }}" class="bottom-nav-link">Stats</a>
+        <a href="{{ url_for('history') }}" class="bottom-nav-link">History</a>
+        <button type="button" class="bottom-nav-link" data-open="more-sheet">More</button>
+    </nav>
+
+    <div class="more-sheet" id="more-sheet" hidden>
+        <nav class="more-sheet-menu" aria-label="More navigation">
+            <a href="{{ url_for('rips') }}" class="more-sheet-item">Rips</a>
+            <a href="{{ url_for('events') }}" class="more-sheet-item">Events</a>
+            <a href="{{ url_for('settings') }}" class="more-sheet-item">Settings</a>
+            <div class="more-sheet-sep"></div>
+            <a href="{{ url_for('logout') }}" class="more-sheet-item more-sheet-item--danger">Logout</a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='tunnel.js') }}"></script>
+    <script src="{{ url_for('static', filename='tracker-test.js') }}"></script>
+    <script src="{{ url_for('static', filename='updates.js') }}"></script>
+    <script src="{{ url_for('static', filename='mobile-more.js') }}"></script>
+    <script src="{{ url_for('static', filename='rips.js') }}"></script>
+</body>
+</html>

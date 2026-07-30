@@ -3,8 +3,9 @@
 A self-hosted web dashboard for [`transmission-daemon`](https://transmissionbt.com/).
 It shows your torrents, live speeds, disk and system stats, an event/history
 log, and can copy finished downloads to a media server over SSH/rsync
-(with Plex/Jellyfin library refresh). An optional topbar indicator surfaces
-WireGuard tunnel health so you notice a dropped VPN before traffic leaks.
+(with Plex/Jellyfin library refresh). It can also rip DVDs from a drive on the
+server with HandBrake. An optional topbar indicator surfaces WireGuard tunnel
+health so you notice a dropped VPN before traffic leaks.
 
 It's a single-user Flask app: one login, polling APIs, SQLite for history.
 Runs comfortably on a Raspberry Pi or small VPS behind gunicorn + systemd.
@@ -18,6 +19,9 @@ Runs comfortably on a Raspberry Pi or small VPS behind gunicorn + systemd.
   development — see [Development](#development--mock-mode))
 - For the media-copy feature: `ssh` and `rsync` on this host, and key-based
   SSH access to the media server
+- For DVD ripping (optional): `HandBrakeCLI` and an optical drive on this
+  host, plus `libdvdcss` for encrypted retail discs — see
+  [DVD ripping](#dvd-ripping-rips-tab)
 - For the tunnel indicator (optional): `wireguard-tools` (`wg`) on this host
 - For the media-bitrate readout (optional): `ffprobe` (from `ffmpeg`) on this
   host, which must also be able to read the download directory. Without it
@@ -27,6 +31,8 @@ System packages (Debian/Ubuntu example):
 
 ```bash
 sudo apt install python3 python3-venv rsync openssh-client ffmpeg
+# Optional, for the Rips tab:
+sudo apt install handbrake-cli libdvd-pkg && sudo dpkg-reconfigure libdvd-pkg
 ```
 
 ---
@@ -538,6 +544,66 @@ run in the History page.
 
 ---
 
+## DVD ripping (Rips tab)
+
+The **Rips** tab drives `HandBrakeCLI` on the machine running the dashboard,
+so it only works with a drive physically attached to that host (`/dev/sr*`).
+Insert a disc, hit **Scan disc**, pick a title, and start the encode.
+
+Requirements:
+
+```bash
+sudo apt install handbrake-cli libdvd-pkg
+sudo dpkg-reconfigure libdvd-pkg   # builds libdvdcss
+```
+
+`libdvdcss` is what allows encrypted retail DVDs to be read; without it a scan
+fails with a decryption error. Check your local rules on descrambling discs you
+own before enabling it.
+
+The dashboard's service user must be able to read the drive, which on
+Debian/Ubuntu means membership of the `cdrom` group:
+
+```bash
+sudo usermod -aG cdrom "$USER"    # then restart the service
+```
+
+systemd applies the user's supplementary groups, so no unit change is needed —
+verify with `grep Groups: /proc/$(pgrep -f 'gunicorn.*app:app' | head -1)/status`
+and check that `24` (cdrom) is listed. The Rips tab says so explicitly when it
+can't read a device.
+
+How it behaves:
+
+- **Scanning** lists every title over the configured minimum length, with
+  duration, chapter count, resolution and per-title audio/subtitle tracks. The
+  longest title is flagged as the main feature and pre-selected — HandBrake's
+  own `MainFeature` field is only populated for Blu-ray, not DVD.
+- **Two long titles** on the same disc usually means theatrical and extended
+  cuts; check the durations before starting.
+- **Audio/subtitles** are opt-in per track. The first non-commentary audio
+  track is pre-selected.
+- **MKV is the default container.** DVD subtitles are VOBSUB bitmaps, which MP4
+  cannot store — picking MP4 with subtitles selected is rejected rather than
+  silently dropping them. Burn them into the picture if you need MP4.
+- **Encoding runs `nice`d** (15 by default). Encoding saturates every core and
+  `transmission-daemon` is single-threaded, so an un-niced rip visibly starves
+  it. One rip at a time by default, for the same reason.
+- **Cancelling or failing removes the partial file** — a half-finished encode
+  can't be resumed, so it isn't left in the output directory. The same applies
+  to a rip interrupted by a dashboard restart, which is reconciled at startup
+  and logged to the Events page.
+- Finished rips are listed on the tab and recorded in the `rip_history` table.
+  They are written locally; copying them to the media server is a separate
+  step (the copy pipeline works on torrents, not rips).
+
+Settings live on the tab itself (output directory, default preset, container,
+nice level, minimum title length, concurrency, eject-when-done) and persist to
+the gitignored `app_config.json`. Defaults come from `.env`
+(`HANDBRAKE_CLI`, `RIP_OUTPUT_DIR`, `RIP_NICE`).
+
+---
+
 ## Development / mock mode
 
 To work on the UI without a real Transmission daemon, set in `.env`:
@@ -549,6 +615,11 @@ USE_MOCK=true
 This swaps in a built-in mock client (`mock_transmission.py`) with sample
 torrents, so you can run `.venv/bin/python app.py` with no daemon and no RPC
 credentials. You still need `DASHBOARD_USER`/`DASHBOARD_PASS` to log in.
+
+Mock mode also swaps in a fake HandBrake backend (`mock_handbrake.py`) with two
+pretend drives, one holding a disc, so the Rips tab is usable on a machine with
+no optical drive. A mock rip takes 45 seconds — override with
+`MOCK_RIP_SECONDS`.
 
 Run the tests with:
 
@@ -571,6 +642,7 @@ secrets or machine-specific state:
 | `media_config.json` | Media-server copy settings (set via Settings UI) | Machine-specific + host details |
 | `copy_state.json` | In-progress/last copy state | Runtime state, auto-created |
 | `scan_state.json` | Media-scan progress state | Runtime state, auto-created |
+| `rip_state.json` | In-progress/last DVD rip state | Runtime state, auto-created |
 | `deploy.sh` | Your personal rsync-deploy script | Contains your server host |
 | `.venv/`, `__pycache__/`, `*.pyc` | Python virtualenv / bytecode | Build artifacts |
 
