@@ -6820,7 +6820,11 @@ def _run_rip_copy(path, folder, cfg):
             "--info=progress2", "--no-i-r",
             *([f"--bwlimit={bwlimit}"] if bwlimit > 0 else []),
             "-e", _copy_ssh_transport(port),
-            "--", path, f"{user}@{host}:{shlex.quote(dest_dir.rstrip('/'))}/",
+            # The remote spec must NOT be shell-quoted. `-s` already stops the
+            # remote shell from splitting it, so quotes would arrive as literal
+            # characters — and a path starting with `'` reads as relative,
+            # landing the copy under the login home instead.
+            "--", path, f"{user}@{host}:{dest_dir.rstrip('/')}/",
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)

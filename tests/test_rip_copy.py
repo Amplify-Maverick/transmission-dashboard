@@ -234,6 +234,86 @@ class TestCopyDestination(_RipCopyBase):
         self.assertIsNone(folder)
 
 
+class TestRsyncCommand(_RipCopyBase):
+    """What rsync is actually invoked with.
+
+    The stub rsync ignores its arguments, so these assertions are the only
+    thing standing between a malformed remote spec and a failed copy — the
+    original bug was a shell-quoted target, which rsync treated as a relative
+    path and tried to create under the login home.
+    """
+
+    def _argv(self, name="Step Brothers.mkv"):
+        path = self.make_file(name)
+        captured = {}
+        real_popen = app.subprocess.Popen
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] == "rsync":
+                captured["cmd"] = list(cmd)
+            return real_popen(cmd, *a, **kw)
+
+        with mock.patch.object(app.subprocess, "Popen", side_effect=spy):
+            app._run_rip_copy(path, self.FOLDER, self.CFG)
+        return path, captured.get("cmd") or []
+
+    def test_remote_spec_is_not_shell_quoted(self):
+        _, cmd = self._argv()
+        target = cmd[-1]
+        self.assertEqual(
+            target, "mediauser@mediahost:/mnt/pool/movies/Step Brothers/")
+        self.assertNotIn("'", target)
+        # A quoted spec starts with a quote, which rsync reads as relative.
+        self.assertTrue(target.split(":", 1)[1].startswith("/"))
+
+    def test_protect_args_is_passed(self):
+        # -s is what makes an unquoted path with spaces safe.
+        _, cmd = self._argv()
+        self.assertIn("-s", cmd)
+
+    def test_local_source_is_the_plain_path(self):
+        path, cmd = self._argv()
+        self.assertEqual(cmd[cmd.index("--") + 1], path)
+
+    def test_spaces_survive_without_quoting(self):
+        _, cmd = self._argv("A Movie With Spaces.mkv")
+        self.assertEqual(
+            cmd[-1],
+            "mediauser@mediahost:/mnt/pool/movies/A Movie With Spaces/")
+
+    def test_bandwidth_limit_only_when_configured(self):
+        path = self.make_file("A.mkv")
+        captured = []
+        real_popen = app.subprocess.Popen
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] == "rsync":
+                captured.append(list(cmd))
+            return real_popen(cmd, *a, **kw)
+
+        with mock.patch.object(app.subprocess, "Popen", side_effect=spy):
+            app._run_rip_copy(path, self.FOLDER, self.CFG)
+            app._run_rip_copy(path, self.FOLDER, dict(self.CFG, bwlimit_kbps=500))
+        self.assertFalse([a for a in captured[0] if a.startswith("--bwlimit")])
+        self.assertIn("--bwlimit=500", captured[1])
+
+    def test_remote_mkdir_is_shell_quoted(self):
+        # The mkdir *is* a shell command string, so it must be quoted — the
+        # opposite of the rsync spec.
+        path = self.make_file("Step Brothers.mkv")
+        seen = []
+        real_run = app.subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and any("mkdir -p" in str(c) for c in cmd):
+                seen.append(cmd[-1])
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(app.subprocess, "run", side_effect=spy):
+            app._run_rip_copy(path, self.FOLDER, self.CFG)
+        self.assertEqual(seen, ["mkdir -p '/mnt/pool/movies/Step Brothers'"])
+
+
 class TestMovieFolderLayout(_RipCopyBase):
     """Jellyfin wants <library>/Movie (Year)/Movie (Year).mkv so the video and
     the .nfo it writes live in the same folder."""
